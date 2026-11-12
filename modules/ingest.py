@@ -59,6 +59,19 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{sec:06.3f}"
 
 
+def sanitize_title(title: str, max_chars: int = 60) -> str:
+    """
+    Sanitizes a title string into a clean folder/file name containing
+    only letters, numbers, and underscores, up to max_chars.
+    Example: 'iShowSpeed vs Alejandro Balde EA FC 1v1!' -> 'iShowSpeed_vs_Alejandro_Balde_EA_FC_1v1'
+    """
+    clean = re.sub(r"[^A-Za-z0-9]+", "_", title).strip("_")
+    clean = re.sub(r"_+", "_", clean)
+    if not clean:
+        clean = "clip"
+    return clean[:max_chars].rstrip("_")
+
+
 def get_video_metadata(url: str) -> Dict[str, Any]:
     """
     Fetches video metadata (title, duration, uploader, id) without downloading media.

@@ -42,6 +42,9 @@ SPLIT_BOTTOM_WIDTH: int = 1080
 SPLIT_BOTTOM_HEIGHT: int = 1280
 SPLIT_BOTTOM_AR: float = SPLIT_BOTTOM_WIDTH / SPLIT_BOTTOM_HEIGHT  # 0.84375
 
+# Default layout mode ('gaming_split' or 'center_crop')
+DEFAULT_LAYOUT: str = "gaming_split"
+
 # Default webcam normalized bounding box [x, y, w, h] (top-left 25% quadrant)
 DEFAULT_WEBCAM_BBOX: Tuple[float, float, float, float] = (0.0, 0.0, 0.25, 0.25)
 

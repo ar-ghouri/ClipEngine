@@ -14,3 +14,6 @@ numpy>=1.24.0
 
 # Stage 3: Gemini Highlight Detection
 google-genai>=0.1.0
+
+# Stage 4: Computer Vision & Facecam Detection
+opencv-python-headless>=4.9.0,<5

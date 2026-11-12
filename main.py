@@ -33,12 +33,18 @@ from database import (
 )
 from modules.brain import detect_highlights
 from modules.captions import generate_ass_subtitles
-from modules.compositor import LayoutMode, compose_clip, probe_video
+from modules.compositor import (
+    LayoutMode,
+    compose_clip,
+    detect_facecam,
+    probe_video,
+)
 from modules.ingest import (
     download_audio_only,
     download_target_clip,
     get_video_metadata,
     parse_timestamp,
+    sanitize_title,
 )
 from modules.transcriber import compute_audio_loudness_peaks, transcribe_audio
 
@@ -100,6 +106,7 @@ def clip_video(
     cam_bbox: str = typer.Option(
         "0.0,0.0,0.25,0.25",
         "--cam-bbox",
+        "--cam-box",
         help="Normalized webcam box 'x,y,w,h' for gaming_split (default top-left quadrant)",
     ),
     hook_title: Optional[str] = typer.Option(
@@ -176,7 +183,26 @@ def clip_video(
     console.print(f"[green]✓ Ingest complete:[/green] {raw_path.name}")
     update_clip_record(clip_id, status="compositing")
 
-    # 4. Generate Karaoke Subtitles if enabled
+    # 4. Resolve Layout and Auto-Webcam Detection
+    user_overrode_bbox = (cam_bbox != "0.0,0.0,0.25,0.25")
+    parsed_bbox = parse_bbox_string(cam_bbox)
+    effective_layout = layout
+    effective_bbox = parsed_bbox
+
+    if layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
+        with console.status("[bold blue]Detecting streamer webcam face..."):
+            detected_bbox = detect_facecam(raw_path)
+            if detected_bbox is not None:
+                effective_bbox = detected_bbox
+                console.print(f"[green]✓ Webcam face detected at normalized coordinates:[/green] {effective_bbox}")
+            else:
+                effective_layout = LayoutMode.CENTER_CROP
+                console.print(
+                    "[yellow]No facecam detected in video. "
+                    "Automatically switching layout to 'center_crop' and lower-third captions.[/yellow]"
+                )
+
+    # 5. Generate Karaoke Subtitles if enabled
     ass_file: Optional[Path] = None
     if captions:
         with console.status("[bold yellow]Generating karaoke subtitles..."):
@@ -190,28 +216,38 @@ def clip_video(
                         output_path=ass_file,
                         clip_start=0.0,
                         clip_end=duration,
-                        layout=layout.value,
+                        layout=effective_layout.value,
+                        hook_title=hook_title,
                     )
                     console.print(f"[green]✓ Generated subtitles:[/green] {ass_file.name}")
             except Exception as exc:
                 console.print(f"[yellow]Warning: Subtitle generation skipped: {exc}[/yellow]")
 
-    # 5. GPU-Accelerated Compositing (Single-pass with NVENC)
-    parsed_bbox = parse_bbox_string(cam_bbox)
-    with console.status(f"[bold magenta]Rendering 1080x1920 using NVIDIA NVENC ({layout.value})..."):
+    # 6. Target Output Path (Organized subfolder if title available)
+    manual_output_file: Optional[Path] = None
+    if hook_title:
+        subfolder_name = sanitize_title(hook_title, max_chars=60)
+        clip_dir = OUTPUTS_DIR / subfolder_name
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        manual_output_file = clip_dir / f"01_{subfolder_name}.mp4"
+
+    # 7. GPU-Accelerated Compositing (Single-pass with NVENC)
+    with console.status(f"[bold magenta]Rendering 1080x1920 using NVIDIA NVENC ({effective_layout.value})..."):
         try:
             output_file = compose_clip(
                 input_video=raw_path,
-                layout=layout,
-                cam_bbox=parsed_bbox,
+                output_path=manual_output_file,
+                layout=effective_layout,
+                cam_bbox=effective_bbox,
                 ass_path=ass_file,
+                auto_detect_cam=False,
             )
         except Exception as exc:
             update_clip_record(clip_id, status="failed_composite")
             console.print(f"[bold red]Compositing Failed:[/bold red] {exc}")
             raise typer.Exit(code=1)
 
-    # 5. Finalize database state
+    # 8. Finalize database state
     update_clip_record(
         clip_id,
         status="completed",
@@ -230,7 +266,7 @@ def clip_video(
     table.add_row("Resolution", f"{final_info['width']}x{final_info['height']} (9:16)")
     table.add_row("Duration", f"{final_info['duration']:.2f}s")
     table.add_row("Encoder", "h264_nvenc (NVIDIA RTX 4060)")
-    table.add_row("Layout", layout.value)
+    table.add_row("Layout", effective_layout.value)
     table.add_row("Raw Section", str(raw_path))
     table.add_row("Final Output", f"[cyan]{output_file}[/cyan]")
     console.print(table)
@@ -254,6 +290,7 @@ def auto_clip_vod(
     cam_bbox: str = typer.Option(
         "0.0,0.0,0.25,0.25",
         "--cam-bbox",
+        "--cam-box",
         help="Normalized webcam coordinates 'x,y,w,h' for gaming_split (default top-left quadrant)",
     ),
     whisper_model: Optional[str] = typer.Option(
@@ -369,13 +406,21 @@ def auto_clip_vod(
 
     # Step 4: Targeted Video Ingest & NVENC Compositing
     console.rule("[bold cyan]Step 4: Smart Targeted Ingest & GPU Compositing[/bold cyan]")
+    user_overrode_bbox = (cam_bbox != "0.0,0.0,0.25,0.25")
     parsed_bbox = parse_bbox_string(cam_bbox)
     completed_clips: List[Dict[str, Any]] = []
+
+    # Ensure organized output subfolder exists: outputs/<sanitized_vod_title>/
+    vod_folder_name = sanitize_title(meta.get("title", "vod_clips"), max_chars=60)
+    vod_output_dir = OUTPUTS_DIR / vod_folder_name
+    vod_output_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"[dim]Output subfolder: [cyan]{vod_output_dir}[/cyan][/dim]")
 
     for idx, cand in enumerate(analysis.candidates, 1):
         dur = cand.end_time - cand.start_time
         console.print(
-            f"\n[bold]Rendering Clip {idx}/{len(analysis.candidates)}:[/bold] [yellow]'{cand.hook_title}'[/yellow]"
+            f"\n[bold]Rendering Clip {idx}/{len(analysis.candidates)}:[/bold] [yellow]'{cand.hook_title}'[/yellow] "
+            f"[dim]({cand.start_time:.1f}s -> {cand.end_time:.1f}s)[/dim]"
         )
 
         # 4a. Register record in SQLite
@@ -389,23 +434,37 @@ def auto_clip_vod(
         )
 
         # 4b. Targeted section download ONLY
-        with console.status(f"  [cyan]Targeted download of section ({cand.start_time:.1f}s -> {cand.end_time:.1f}s)..."):
-            try:
-                raw_clip = download_target_clip(
-                    url=url,
-                    start_time=cand.start_time,
-                    end_time=cand.end_time,
-                    output_dir=DOWNLOADS_DIR,
-                    prefix=f"clip_{clip_id}",
-                )
-            except Exception as exc:
-                update_clip_record(clip_id, status="failed_ingest")
-                console.print(f"  [red]Download failed:[/red] {exc}")
-                continue
+        try:
+            raw_clip = download_target_clip(
+                url=url,
+                start_time=cand.start_time,
+                end_time=cand.end_time,
+                output_dir=DOWNLOADS_DIR,
+                prefix=f"clip_{clip_id}",
+            )
+            console.print(f"  [green]✓ Ingest:[/green] {raw_clip.name} ({dur:.1f}s)")
+        except Exception as exc:
+            update_clip_record(clip_id, status="failed_ingest")
+            console.print(f"  [red]✗ Download failed:[/red] {exc}")
+            continue
 
         update_clip_record(clip_id, status="compositing")
 
-        # 4c. Generate zero-flicker karaoke subtitles from Stage 2 transcript
+        # Resolve webcam & layout mode (smart auto-detection + fallback)
+        clip_layout = layout
+        clip_bbox = parsed_bbox
+        if layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
+            detected_bbox = detect_facecam(raw_clip)
+            if detected_bbox is not None:
+                clip_bbox = detected_bbox
+                console.print(f"  [green]✓ Facecam:[/green] detected at {clip_bbox} -> gaming_split")
+            else:
+                clip_layout = LayoutMode.CENTER_CROP
+                console.print(
+                    "  [yellow]✓ Facecam:[/yellow] none detected -> fallback to center_crop"
+                )
+
+        # 4c. Generate zero-flicker karaoke subtitles + 3.5s hook banner
         ass_path: Optional[Path] = None
         if captions and transcript.segments:
             clip_words = [
@@ -421,24 +480,31 @@ def auto_clip_vod(
                     output_path=ass_file,
                     clip_start=cand.start_time,
                     clip_end=cand.end_time,
-                    layout=layout.value,
+                    layout=clip_layout.value,
+                    hook_title=cand.hook_title,
                 )
                 ass_path = ass_file
-                console.print(f"  [dim green]Karaoke captions generated: {ass_file.name}[/dim green]")
+                console.print(f"  [green]✓ Captions:[/green] {ass_file.name} (3.5s hook banner + karaoke)")
+
+        # Target output path: outputs/<sanitized_vod_title>/<index:02d>_<sanitized_hook_title>.mp4
+        hook_clean = sanitize_title(cand.hook_title, max_chars=60)
+        target_clip_output = vod_output_dir / f"{idx:02d}_{hook_clean}.mp4"
 
         # 4d. Single-pass GPU NVENC Compositing
-        with console.status(f"  [magenta]Compositing via h264_nvenc ({layout.value})..."):
-            try:
-                output_video = compose_clip(
-                    input_video=raw_clip,
-                    layout=layout,
-                    cam_bbox=parsed_bbox,
-                    ass_path=ass_path,
-                )
-            except Exception as exc:
-                update_clip_record(clip_id, status="failed_composite")
-                console.print(f"  [red]Compositing failed:[/red] {exc}")
-                continue
+        try:
+            output_video = compose_clip(
+                input_video=raw_clip,
+                output_path=target_clip_output,
+                layout=clip_layout,
+                cam_bbox=clip_bbox,
+                ass_path=ass_path,
+                auto_detect_cam=False,
+            )
+            console.print(f"  [green]✓ Rendered:[/green] {output_video.name}")
+        except Exception as exc:
+            update_clip_record(clip_id, status="failed_composite")
+            console.print(f"  [red]✗ Compositing failed:[/red] {exc}")
+            continue
 
         update_clip_record(clip_id, status="completed", output_path=str(output_video))
         completed_clips.append(
@@ -447,11 +513,11 @@ def auto_clip_vod(
                 "hook_title": cand.hook_title,
                 "score": cand.virality_score,
                 "duration": dur,
+                "layout": clip_layout.value,
                 "captions": "Burned" if ass_path else "None",
                 "path": output_video,
             }
         )
-        console.print(f"  [green]✓ Output ready:[/green] {output_video.name}")
 
     # Summary
     console.print("\n")
@@ -464,6 +530,7 @@ def auto_clip_vod(
     table.add_column("Hook Title", width=35)
     table.add_column("Score", justify="center", width=8)
     table.add_column("Duration", justify="center", width=10)
+    table.add_column("Layout", justify="center", width=14)
     table.add_column("Captions", justify="center", width=10)
     table.add_column("Output File Path")
 
@@ -473,6 +540,7 @@ def auto_clip_vod(
             c["hook_title"],
             f"{c['score']:.1f}/10",
             f"{c['duration']:.1f}s",
+            c["layout"],
             f"[green]{c['captions']}[/green]",
             str(c["path"]),
         )

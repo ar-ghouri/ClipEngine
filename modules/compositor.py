@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import cv2
 
 from config import (
     AUDIO_BITRATE,
@@ -240,12 +243,161 @@ def build_filtergraph(
         raise ValueError(f"Unsupported layout mode: {layout}")
 
 
+def detect_facecam(
+    video_path: Path,
+    min_face_size: int = 60,
+    min_neighbors: int = 5,
+) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Extracts 3 sample frames (at 20%, 50%, and 80% of the clip duration) and runs OpenCV
+    haarcascade_frontalface_default.xml detector.
+
+    If a corner/overlay facecam is detected consistently across sample frames, computes
+    normalized (cam_x, cam_y, cam_w, cam_h) comfortably padded around the speaker's head.
+    If no corner facecam is detected (e.g. full-screen IRL footage or faceless gameplay),
+    returns None to trigger automatic fallback to center_crop.
+    """
+    video_path = Path(video_path).resolve()
+    if not video_path.exists():
+        return None
+
+    haarcascades_dir = getattr(getattr(cv2, "data", None), "haarcascades", None)
+    if haarcascades_dir:
+        cascade_file = Path(haarcascades_dir) / "haarcascade_frontalface_default.xml"
+    else:
+        cascade_file = Path(cv2.__file__).parent / "data" / "haarcascade_frontalface_default.xml"
+    if not cascade_file.exists():
+        logger.warning("Haar cascade XML not found at %s", cascade_file)
+        return None
+
+    cascade = cv2.CascadeClassifier(str(cascade_file))
+    if cascade.empty():
+        logger.warning("Failed to load Haar cascade classifier")
+        return None
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        logger.warning("cv2.VideoCapture could not open %s", video_path)
+        return None
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    if total_frames <= 0 or src_w <= 0 or src_h <= 0:
+        cap.release()
+        return None
+
+    # Extract 3 sample frames: 20%, 50%, and 80% of clip duration
+    sample_pcts = [0.20, 0.50, 0.80]
+    sample_indices = [max(0, min(total_frames - 1, int(total_frames * p))) for p in sample_pcts]
+
+    effective_min_size = max(min_face_size, int(src_h * 0.06))
+    frame_face_lists: List[List[Tuple[int, int, int, int, float, float]]] = []
+
+    for f_idx in sample_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            continue
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=min_neighbors,
+            minSize=(effective_min_size, effective_min_size),
+        )
+
+        valid_corner_faces: List[Tuple[int, int, int, int, float, float]] = []
+        if len(faces) > 0:
+            for (fx, fy, fw, fh) in faces:
+                cx = (float(fx) + float(fw) / 2.0) / src_w
+                cy = (float(fy) + float(fh) / 2.0) / src_h
+                norm_w = float(fw) / src_w
+                norm_h = float(fh) / src_h
+
+                # If face is dead-center and large, it's full-screen IRL footage (not a corner webcam)
+                is_dead_center = (0.35 <= cx <= 0.65) and (0.25 <= cy <= 0.70)
+                if is_dead_center and (norm_w > 0.22 or norm_h > 0.25):
+                    continue
+
+                # Check if face is in an overlay region (perimeter, corner, or off-center)
+                is_corner_overlay = (cx < 0.45 or cx > 0.55) or (cy < 0.40 or cy > 0.60)
+                if is_corner_overlay:
+                    valid_corner_faces.append((int(fx), int(fy), int(fw), int(fh), cx, cy))
+
+        frame_face_lists.append(valid_corner_faces)
+
+    cap.release()
+
+    # Spatial clustering across sampled frames to detect consistency
+    clusters: List[List[Tuple[int, int, int, int, float, float]]] = []
+    for face_list in frame_face_lists:
+        for face in face_list:
+            matched = False
+            for cluster in clusters:
+                avg_cx = sum(item[4] for item in cluster) / len(cluster)
+                avg_cy = sum(item[5] for item in cluster) / len(cluster)
+                dist = math.hypot(face[4] - avg_cx, face[5] - avg_cy)
+                if dist < 0.15:  # Within 15% normalized distance threshold
+                    cluster.append(face)
+                    matched = True
+                    break
+            if not matched:
+                clusters.append([face])
+
+    # A corner/overlay facecam is consistent if detected in >= 2 frames (or 1 if only 1 frame could be read)
+    min_required_frames = 2 if len(frame_face_lists) >= 2 else 1
+    consistent_clusters = [c for c in clusters if len(c) >= min_required_frames]
+
+    if not consistent_clusters:
+        return None
+
+    # Select the primary consistent cluster (largest face area)
+    best_cluster = max(consistent_clusters, key=lambda c: sum(item[2] * item[3] for item in c))
+
+    avg_fx = sum(item[0] for item in best_cluster) / len(best_cluster)
+    avg_fy = sum(item[1] for item in best_cluster) / len(best_cluster)
+    avg_fw = sum(item[2] for item in best_cluster) / len(best_cluster)
+    avg_fh = sum(item[3] for item in best_cluster) / len(best_cluster)
+
+    # Pad generously around head and shoulders with ample headroom to prevent clipping
+    headroom = avg_fh * 0.70
+    chest = avg_fh * 1.10
+    crop_h = avg_fh + headroom + chest
+    crop_w = crop_h * SPLIT_TOP_AR
+
+    cx_face = avg_fx + (avg_fw / 2.0)
+    box_x = cx_face - (crop_w / 2.0)
+    box_y = avg_fy - headroom
+
+    # Boundary adjustments maintaining SPLIT_TOP_AR
+    if box_y + crop_h > src_h:
+        box_y = max(0.0, float(src_h) - crop_h)
+    if box_y < 0:
+        box_y = 0.0
+
+    if box_x + crop_w > src_w:
+        box_x = max(0.0, float(src_w) - crop_w)
+    if box_x < 0:
+        box_x = 0.0
+
+    cam_x = round(box_x / src_w, 4)
+    cam_y = round(box_y / src_h, 4)
+    cam_w = round(crop_w / src_w, 4)
+    cam_h = round(crop_h / src_h, 4)
+
+    return (cam_x, cam_y, cam_w, cam_h)
+
+
 def compose_clip(
     input_video: Path,
     output_path: Optional[Path] = None,
     layout: Union[LayoutMode, str] = LayoutMode.GAMING_SPLIT,
     cam_bbox: Tuple[float, float, float, float] = DEFAULT_WEBCAM_BBOX,
     ass_path: Optional[Path] = None,
+    auto_detect_cam: bool = True,
     nvenc_preset: str = NVENC_PRESET,
     nvenc_cq: int = NVENC_CQ,
 ) -> Path:
@@ -259,6 +411,7 @@ def compose_clip(
         layout: "center_crop" or "gaming_split".
         cam_bbox: Normalized (x, y, w, h) for webcam region in gaming_split.
         ass_path: Optional path to .ass subtitle script to burn in single pass.
+        auto_detect_cam: When True and cam_bbox is default, auto-detects webcam face and falls back to center_crop if faceless.
         nvenc_preset: NVENC preset (e.g. "p4").
         nvenc_cq: Constant Quality target (e.g. 23).
 
@@ -271,6 +424,16 @@ def compose_clip(
 
     if isinstance(layout, str):
         layout = LayoutMode(layout.lower())
+
+    # Smart Auto-Webcam Detection & Fallback if gaming_split is requested with default cam_bbox
+    if layout == LayoutMode.GAMING_SPLIT and auto_detect_cam and cam_bbox == DEFAULT_WEBCAM_BBOX:
+        detected_cam = detect_facecam(input_path)
+        if detected_cam is not None:
+            cam_bbox = detected_cam
+            logger.info("Auto-detected webcam region at %s", cam_bbox)
+        else:
+            layout = LayoutMode.CENTER_CROP
+            logger.info("No face detected in video; auto-fallback to center_crop layout.")
 
     if output_path is None:
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)

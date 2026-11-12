@@ -47,9 +47,101 @@ def format_ass_time(seconds: float) -> str:
 
 
 def clean_caption_text(text: str) -> str:
-    """Cleans word text, removing ASS curly brace overrides and normalizing whitespace."""
+    """Cleans word text, removing ASS curly brace overrides, stripping stray leading apostrophes and trailing commas, and capitalizing."""
     cleaned = re.sub(r"[{}]", "", text).strip()
+    cleaned = re.sub(r"^['’]+", "", cleaned)
+    cleaned = re.sub(r",+$", "", cleaned).strip()
     return cleaned.upper()
+
+
+def collapse_repetitions(words: List[WordTimestamp]) -> List[WordTimestamp]:
+    """
+    Collapses 3+ consecutive identical words (e.g. 'NO, NO, NO, NO' or 'AHHHHH AHHHHH AHHHHH')
+    into a single emphasized word with an exclamation mark ('NO!' or 'AHHHHH!').
+    """
+    if not words:
+        return []
+
+    result: List[WordTimestamp] = []
+    i = 0
+    n = len(words)
+    while i < n:
+        base_norm = re.sub(r"[^A-Za-z0-9']+", "", words[i].word).upper()
+        if not base_norm:
+            result.append(words[i])
+            i += 1
+            continue
+
+        j = i + 1
+        while j < n and re.sub(r"[^A-Za-z0-9']+", "", words[j].word).upper() == base_norm:
+            j += 1
+
+        count = j - i
+        if count >= 3:
+            raw_clean = words[i].word.strip().rstrip(",.?!")
+            collapsed_word = f"{raw_clean}!"
+            result.append(
+                WordTimestamp(
+                    word=collapsed_word,
+                    start=words[i].start,
+                    end=words[j - 1].end,
+                    probability=max(w.probability for w in words[i:j]),
+                )
+            )
+            i = j
+        else:
+            for k in range(i, j):
+                result.append(words[k])
+            i = j
+
+    return result
+
+
+def normalize_contractions(words: List[WordTimestamp]) -> List[WordTimestamp]:
+    """
+    Normalizes word list by merging any token that starts with an apostrophe (' or ’)
+    onto the end of the previous word (combining their start/end timestamps), and
+    strips any stray leading apostrophes from standalone words so chunks never
+    render split contractions like 'FOR ALL Y' or ''ALL OVERWATCH'.
+    """
+    if not words:
+        return []
+
+    normalized: List[WordTimestamp] = []
+    for w in words:
+        raw_text = w.word.strip()
+        if not raw_text:
+            continue
+
+        if raw_text.startswith(("'", "’")):
+            if normalized:
+                prev = normalized[-1]
+                prev_text = prev.word.rstrip()
+                prev.word = f"{prev_text}{raw_text}"
+                prev.end = max(prev.end, w.end)
+                prev.probability = min(prev.probability, w.probability)
+            else:
+                stripped = re.sub(r"^['’]+", "", raw_text)
+                if stripped:
+                    normalized.append(
+                        WordTimestamp(
+                            word=stripped,
+                            start=w.start,
+                            end=w.end,
+                            probability=w.probability,
+                        )
+                    )
+        else:
+            normalized.append(
+                WordTimestamp(
+                    word=w.word,
+                    start=w.start,
+                    end=w.end,
+                    probability=w.probability,
+                )
+            )
+
+    return normalized
 
 
 def chunk_words(
@@ -69,6 +161,10 @@ def chunk_words(
     """
     if not words:
         return []
+
+    # Preprocess words: merge contractions, clean leading apostrophes, and collapse 3+ repetitions
+    words = normalize_contractions(words)
+    words = collapse_repetitions(words)
 
     end_bound = clip_end if clip_end is not None else (max(w.end for w in words) + 1.0)
 
@@ -119,12 +215,13 @@ def generate_ass_subtitles(
     clip_start: float = 0.0,
     clip_end: Optional[float] = None,
     layout: str = "gaming_split",
+    hook_title: Optional[str] = None,
     style: Optional[CaptionStyle] = None,
     words_per_group: int = 3,
 ) -> Path:
     """
     Builds an Advanced SubStation Alpha (.ass) file with zero-flicker word-by-word
-    karaoke highlighting and layout-aware vertical positioning.
+    karaoke highlighting, viral 3.5s hook banner overlay, and layout-aware vertical positioning.
 
     Args:
         words: List of WordTimestamp from Stage 2 transcription.
@@ -132,6 +229,7 @@ def generate_ass_subtitles(
         clip_start: Absolute timestamp in VOD where the clip begins.
         clip_end: Absolute timestamp in VOD where the clip ends.
         layout: 'gaming_split' (centered on 640px seam) or 'center_crop' (lower third).
+        hook_title: Optional headline hook title to overlay for the first 3.5 seconds.
         style: Optional typography override.
         words_per_group: Number of words per phrase group (default 3).
 
@@ -165,6 +263,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{style.font_name},{style.font_size},{style.primary_color},&H000000FF,{style.outline_color},{style.shadow_color},-1,0,0,0,100,100,0,0,1,{style.outline_width},{style.shadow_width},{alignment},40,40,{margin_v},1
+Style: HookBanner,Arial Black,54,&H00FFFFFF,&H000000FF,&H00000000,&H20000000,-1,0,0,0,100,100,0,0,3,14,0,5,40,40,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -178,6 +277,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     )
 
     events: List[str] = []
+
+    # 3.5s Viral Hook Title Overlay Banner
+    if hook_title:
+        clean_hook = re.sub(r"[{}]", "", hook_title).strip().upper()
+        # For gaming_split: \pos(540,735) (top of gameplay zone)
+        # For center_crop: \pos(540,260) (upper third safe zone)
+        banner_pos = r"\pos(540,735)" if is_gaming_split else r"\pos(540,260)"
+        events.append(
+            f"Dialogue: 1,0:00:00.00,0:00:03.50,HookBanner,,0,0,0,,{{{banner_pos}\\fad(0,250)}}{clean_hook}"
+        )
 
     for chunk_idx, chunk in enumerate(chunks):
         num_words = len(chunk)
