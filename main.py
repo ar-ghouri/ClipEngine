@@ -32,6 +32,7 @@ from database import (
     update_clip_record,
 )
 from modules.brain import detect_highlights
+from modules.captions import generate_ass_subtitles
 from modules.compositor import LayoutMode, compose_clip, probe_video
 from modules.ingest import (
     download_audio_only,
@@ -113,6 +114,11 @@ def clip_video(
         "-v",
         help="Virality score (0-10)",
     ),
+    captions: bool = typer.Option(
+        True,
+        "--captions/--no-captions",
+        help="Burn dynamic word-by-word karaoke subtitles",
+    ),
 ):
     """
     Downloads targeted timestamp range with yt-dlp, renders 9:16 vertical video via NVENC,
@@ -170,7 +176,27 @@ def clip_video(
     console.print(f"[green]✓ Ingest complete:[/green] {raw_path.name}")
     update_clip_record(clip_id, status="compositing")
 
-    # 4. GPU-Accelerated Compositing
+    # 4. Generate Karaoke Subtitles if enabled
+    ass_file: Optional[Path] = None
+    if captions:
+        with console.status("[bold yellow]Generating karaoke subtitles..."):
+            try:
+                clip_transcript = transcribe_audio(raw_path)
+                clip_words = [w for seg in clip_transcript.segments for w in seg.words]
+                if clip_words:
+                    ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
+                    generate_ass_subtitles(
+                        words=clip_words,
+                        output_path=ass_file,
+                        clip_start=0.0,
+                        clip_end=duration,
+                        layout=layout.value,
+                    )
+                    console.print(f"[green]✓ Generated subtitles:[/green] {ass_file.name}")
+            except Exception as exc:
+                console.print(f"[yellow]Warning: Subtitle generation skipped: {exc}[/yellow]")
+
+    # 5. GPU-Accelerated Compositing (Single-pass with NVENC)
     parsed_bbox = parse_bbox_string(cam_bbox)
     with console.status(f"[bold magenta]Rendering 1080x1920 using NVIDIA NVENC ({layout.value})..."):
         try:
@@ -178,6 +204,7 @@ def clip_video(
                 input_video=raw_path,
                 layout=layout,
                 cam_bbox=parsed_bbox,
+                ass_path=ass_file,
             )
         except Exception as exc:
             update_clip_record(clip_id, status="failed_composite")
@@ -243,6 +270,11 @@ def auto_clip_vod(
         55.0,
         "--max-duration",
         help="Maximum clip duration in seconds (strictly <= 55.0)",
+    ),
+    captions: bool = typer.Option(
+        True,
+        "--captions/--no-captions",
+        help="Burn dynamic word-by-word karaoke subtitles",
     ),
 ):
     """
@@ -373,13 +405,35 @@ def auto_clip_vod(
 
         update_clip_record(clip_id, status="compositing")
 
-        # 4c. NVENC Compositing
+        # 4c. Generate zero-flicker karaoke subtitles from Stage 2 transcript
+        ass_path: Optional[Path] = None
+        if captions and transcript.segments:
+            clip_words = [
+                w
+                for seg in transcript.segments
+                for w in seg.words
+                if w.end > cand.start_time and w.start < cand.end_time
+            ]
+            if clip_words:
+                ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
+                generate_ass_subtitles(
+                    words=clip_words,
+                    output_path=ass_file,
+                    clip_start=cand.start_time,
+                    clip_end=cand.end_time,
+                    layout=layout.value,
+                )
+                ass_path = ass_file
+                console.print(f"  [dim green]Karaoke captions generated: {ass_file.name}[/dim green]")
+
+        # 4d. Single-pass GPU NVENC Compositing
         with console.status(f"  [magenta]Compositing via h264_nvenc ({layout.value})..."):
             try:
                 output_video = compose_clip(
                     input_video=raw_clip,
                     layout=layout,
                     cam_bbox=parsed_bbox,
+                    ass_path=ass_path,
                 )
             except Exception as exc:
                 update_clip_record(clip_id, status="failed_composite")
@@ -393,6 +447,7 @@ def auto_clip_vod(
                 "hook_title": cand.hook_title,
                 "score": cand.virality_score,
                 "duration": dur,
+                "captions": "Burned" if ass_path else "None",
                 "path": output_video,
             }
         )
@@ -409,6 +464,7 @@ def auto_clip_vod(
     table.add_column("Hook Title", width=35)
     table.add_column("Score", justify="center", width=8)
     table.add_column("Duration", justify="center", width=10)
+    table.add_column("Captions", justify="center", width=10)
     table.add_column("Output File Path")
 
     for c in completed_clips:
@@ -417,6 +473,7 @@ def auto_clip_vod(
             c["hook_title"],
             f"{c['score']:.1f}/10",
             f"{c['duration']:.1f}s",
+            f"[green]{c['captions']}[/green]",
             str(c["path"]),
         )
 

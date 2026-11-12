@@ -75,7 +75,7 @@ def create_clip_record(
             ),
         )
         conn.commit()
-        return cursor.lastrowid
+        return int(cursor.lastrowid or 0)
 
 
 def update_clip_record(

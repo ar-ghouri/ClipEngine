@@ -68,7 +68,7 @@ def get_video_metadata(url: str) -> Dict[str, Any]:
         "quiet": True,
         "no_warnings": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(params=ydl_opts) as ydl: # type: ignore[arg-type]
         info = ydl.extract_info(url, download=False)
         return {
             "id": info.get("id"),
@@ -116,8 +116,19 @@ def download_target_clip(
     # Sanitized safe filename
     clean_start = re.sub(r"[:.]", "_", start_formatted)
     clean_end = re.sub(r"[:.]", "_", end_formatted)
-    out_template = str(output_dir / f"{prefix}_%(id)s_{clean_start}_{clean_end}.%(ext)s")
 
+    # Check if this exact section was already downloaded
+    existing_section = list(output_dir.glob(f"*_{clean_start}_{clean_end}.mp4"))
+    for f in existing_section:
+        if f.exists() and f.stat().st_size > 50000:
+            target_f = output_dir / f"{prefix}_{f.name.split('_', 2)[-1]}"
+            if target_f != f:
+                import shutil
+                shutil.copy2(f, target_f)
+                return target_f.resolve()
+            return f.resolve()
+
+    out_template = str(output_dir / f"{prefix}_%(id)s_{clean_start}_{clean_end}.%(ext)s")
     ffmpeg_dir = str(Path(FFMPEG_BIN).parent)
 
     cmd = [
@@ -127,6 +138,10 @@ def download_target_clip(
         "--download-sections",
         section_arg,
         "--force-keyframes-at-cuts",
+        "--retries",
+        "3",
+        "--fragment-retries",
+        "3",
         "-f",
         "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         "--merge-output-format",
@@ -140,9 +155,14 @@ def download_target_clip(
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"yt-dlp targeted download failed (code {result.returncode}):\n{result.stderr}"
-        )
+        # Retry with android player client fallback if 403 or format error occurred
+        retry_cmd = list(cmd)
+        retry_cmd.extend(["--extractor-args", "youtube:player_client=android,web"])
+        result = subprocess.run(retry_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"yt-dlp targeted download failed (code {result.returncode}):\n{result.stderr}"
+            )
 
     # Resolve resulting file on disk
     expected_pattern = f"{prefix}_*_{clean_start}_{clean_end}.mp4"

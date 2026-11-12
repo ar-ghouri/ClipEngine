@@ -12,7 +12,7 @@ import logging
 import subprocess
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 from config import (
     AUDIO_BITRATE,
@@ -184,23 +184,40 @@ def calculate_gameplay_crop(src_w: int, src_h: int) -> Tuple[int, int, int, int]
     return w_even, h_even, x_even, y_even
 
 
+def escape_ffmpeg_path(path: Union[Path, str]) -> str:
+    """
+    Converts a file path to POSIX style and escapes Windows drive colons
+    and special characters for FFmpeg filtergraph strings (e.g. libass).
+    E:\\path\\file.ass -> E\\:/path/file.ass
+    """
+    posix_path = str(Path(path).resolve()).replace("\\", "/")
+    if len(posix_path) >= 2 and posix_path[1] == ":":
+        posix_path = posix_path[0] + "\\:" + posix_path[2:]
+    posix_path = posix_path.replace("'", "'\\''")
+    return posix_path
+
+
 def build_filtergraph(
     layout: LayoutMode,
     src_w: int,
     src_h: int,
     cam_bbox: Tuple[float, float, float, float] = DEFAULT_WEBCAM_BBOX,
+    ass_path: Optional[Path] = None,
 ) -> str:
     """
     Constructs the FFmpeg complex filtergraph for the selected layout mode.
-    Guarantees square pixel SAR 1:1 and pristine 1080x1920 output.
+    Guarantees square pixel SAR 1:1 and burns .ass subtitles if provided.
     """
     if layout == LayoutMode.CENTER_CROP:
         # Standard 9:16 center crop
-        return (
+        fg = (
             f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
             f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT},"
-            f"setsar=1[v]"
+            f"setsar=1"
         )
+        if ass_path:
+            fg += f",ass='{escape_ffmpeg_path(ass_path)}'"
+        return fg + "[v]"
 
     elif layout == LayoutMode.GAMING_SPLIT:
         # Top webcam slot: 1080x640
@@ -208,14 +225,16 @@ def build_filtergraph(
         # Bottom gameplay slot: 1080x1280
         bot_w, bot_h, bot_x, bot_y = calculate_gameplay_crop(src_w, src_h)
 
-        filtergraph = (
+        fg = (
             f"[0:v]crop={top_w}:{top_h}:{top_x}:{top_y},"
             f"scale={SPLIT_TOP_WIDTH}:{SPLIT_TOP_HEIGHT},setsar=1[top];"
             f"[0:v]crop={bot_w}:{bot_h}:{bot_x}:{bot_y},"
             f"scale={SPLIT_BOTTOM_WIDTH}:{SPLIT_BOTTOM_HEIGHT},setsar=1[bottom];"
-            f"[top][bottom]vstack=inputs=2,setsar=1[v]"
+            f"[top][bottom]vstack=inputs=2,setsar=1"
         )
-        return filtergraph
+        if ass_path:
+            fg += f",ass='{escape_ffmpeg_path(ass_path)}'"
+        return fg + "[v]"
 
     else:
         raise ValueError(f"Unsupported layout mode: {layout}")
@@ -226,17 +245,20 @@ def compose_clip(
     output_path: Optional[Path] = None,
     layout: Union[LayoutMode, str] = LayoutMode.GAMING_SPLIT,
     cam_bbox: Tuple[float, float, float, float] = DEFAULT_WEBCAM_BBOX,
+    ass_path: Optional[Path] = None,
     nvenc_preset: str = NVENC_PRESET,
     nvenc_cq: int = NVENC_CQ,
 ) -> Path:
     """
-    Composites a 9:16 vertical video clip using NVIDIA NVENC hardware acceleration.
+    Composites a 9:16 vertical video clip using NVIDIA NVENC hardware acceleration
+    with optional single-pass burning of .ass karaoke subtitles.
 
     Args:
         input_video: Path to the raw downloaded video section.
         output_path: Desired output path in outputs/ (auto-generated if None).
         layout: "center_crop" or "gaming_split".
         cam_bbox: Normalized (x, y, w, h) for webcam region in gaming_split.
+        ass_path: Optional path to .ass subtitle script to burn in single pass.
         nvenc_preset: NVENC preset (e.g. "p4").
         nvenc_cq: Constant Quality target (e.g. 23).
 
@@ -262,7 +284,7 @@ def compose_clip(
     src_w = probe_info["width"]
     src_h = probe_info["height"]
 
-    filtergraph = build_filtergraph(layout, src_w, src_h, cam_bbox)
+    filtergraph = build_filtergraph(layout, src_w, src_h, cam_bbox, ass_path=ass_path)
 
     cmd = [
         FFMPEG_BIN,
@@ -300,4 +322,8 @@ def compose_clip(
         raise RuntimeError(f"Compositing completed but output file is empty or missing: {output_path}")
 
     return output_path
+
+
+# Alias for render_clip contract
+render_clip = compose_clip
 

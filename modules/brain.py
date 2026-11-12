@@ -102,14 +102,14 @@ def detect_highlights(
     client = init_gemini_client(api_key)
     from google.genai import types
 
-    # Format transcript lines with timestamps
+    # Format transcript lines with timestamps showing BOTH raw seconds and MM:SS
     transcript_lines: List[str] = []
     for seg in transcript.segments:
         m_start = int(seg.start // 60)
         s_start = int(seg.start % 60)
         m_end = int(seg.end // 60)
         s_end = int(seg.end % 60)
-        time_tag = f"[{m_start:02d}:{s_start:02d} -> {m_end:02d}:{s_end:02d}]"
+        time_tag = f"[{seg.start:.1f}s ({m_start:02d}:{s_start:02d}) -> {seg.end:.1f}s ({m_end:02d}:{s_end:02d})]"
         transcript_lines.append(f"{time_tag} {seg.text}")
 
     full_transcript_text = "\n".join(transcript_lines)
@@ -128,13 +128,15 @@ You are an elite short-form video editor specializing in viral TikToks, YouTube 
 Your mission is to find the top {top_k} most engaging, high-retention moments from this stream/video.
 
 ### CRITICAL RULES:
-1. VIDEO BOUNDS: Total video duration is {total_duration_sec:.1f} seconds. Both `start_time` and `end_time` MUST be between 0.0 and {total_duration_sec:.1f}. NEVER exceed {total_duration_sec:.1f}s!
-2. DURATION: Each clip must be STRICTLY between {min_duration:.0f} and {max_duration:.0f} seconds long (duration = end_time - start_time).
-3. BOUNDARIES: `start_time` and `end_time` MUST align with natural sentence boundaries from the transcript. NEVER cut mid-sentence or mid-thought.
-4. AUDIO PEAKS: Use the acoustic loudness spikes below as clues. Streamer screams, laughter, gasps, and loud hype moments often make great climaxes for clips.
-5. HOOK TITLE: Generate an intriguing, curiosity-gap title under 60 characters (e.g. "He didn't realize the mic was on...", "The 1 in a million shot that broke him"). NO cringe hashtag spam.
-6. INDEPENDENT VALUE: Every clip must make sense on its own with clear setup, action, and resolution/punchline.
-7. NO OVERLAPS: Candidate clips must not overlap each other.
+1. QUANTITY: You MUST return EXACTLY {top_k} candidate clips (or up to {top_k} distinct non-overlapping moments if the video length permits). Do NOT return only 1 clip when multiple highlight moments exist!
+2. RAW SECONDS ONLY: All `start_time` and `end_time` fields in your JSON response MUST be raw seconds as floating-point numbers within [0.0, {total_duration_sec:.1f}].
+   CRITICAL NOTE: Do NOT confuse minutes with hundreds of seconds! For example: 2 minutes 7 seconds is 127.0 seconds, NOT 207 seconds. Always use the raw seconds values shown before the parentheses in the transcript (e.g. 127.8s)!
+3. DURATION: Each clip must be STRICTLY between {min_duration:.0f} and {max_duration:.0f} seconds long (duration = end_time - start_time).
+4. BOUNDARIES: `start_time` and `end_time` MUST align with natural sentence boundaries from the transcript. NEVER cut mid-sentence or mid-thought.
+5. AUDIO PEAKS: Use the acoustic loudness spikes below as clues. Streamer screams, laughter, gasps, and loud hype moments often make great climaxes for clips.
+6. HOOK TITLE: Generate an intriguing, curiosity-gap title under 60 characters (e.g. "He didn't realize the mic was on...", "The 1 in a million shot that broke him"). NO cringe hashtag spam.
+7. INDEPENDENT VALUE: Every clip must make sense on its own with clear setup, action, and resolution/punchline.
+8. NO OVERLAPS: Candidate clips must not overlap each other.
 
 ### AUDIO LOUDNESS SPIKES (Screams, Laughter, Hype):
 {peaks_text}
@@ -144,7 +146,7 @@ Your mission is to find the top {top_k} most engaging, high-retention moments fr
 """
 
     candidate_models = [model_name]
-    for fallback in ("gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash"):
+    for fallback in ("gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.5-flash"):
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 
