@@ -1,0 +1,11 @@
+# Core Engine Dependencies (Stage 1)
+yt-dlp>=2024.8.6
+typer[all]>=0.12.0
+rich>=13.7.0
+python-dotenv>=1.0.1
+pydantic>=2.7.0
+
+# Future Stage Dependencies (Commented out for Stage 1)
+# faster-whisper>=1.0.0   # Stage 2: GPU/CPU Audio Transcription
+# google-genai>=0.1.0     # Stage 3: Gemini Highlight Detection
+
