@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 from dotenv import load_dotenv
 
 # Base Directory & Project Roots
@@ -51,6 +52,44 @@ NVENC_CQ: int = 23             # Constant Quality level for NVENC VBR
 AUDIO_CODEC: str = "aac"
 AUDIO_BITRATE: str = "192k"
 
+# Stage 2: Whisper Transcription Settings
+WHISPER_MODEL: str = "large-v3-turbo"   # Fast & high-accuracy on RTX 4060
+WHISPER_DEVICE: str = "cuda"
+WHISPER_COMPUTE_TYPE: str = "float16"
+WHISPER_VAD_FILTER: bool = True
+
+# Stage 3: Gemini Highlight Detection Settings
+GEMINI_MODEL: str = "gemini-2.5-flash"
+
+
+def register_cuda_dlls() -> List[str]:
+    """
+    On Windows, Python 3.8+ does not load DLLs from PATH automatically.
+    Dynamically locates nvidia/cublas/bin and nvidia/cudnn/bin inside site-packages
+    and registers them via os.add_dll_directory() so CTranslate2 / faster-whisper
+    can load cublas64_12.dll and cudnn64_9.dll on the RTX 4060.
+    """
+    registered: List[str] = []
+    site_packages = [Path(p) for p in sys.path if "site-packages" in p]
+    # Also check .venv/Lib/site-packages directly if sys.path doesn't list it yet
+    venv_sp = BASE_DIR / ".venv" / "Lib" / "site-packages"
+    if venv_sp.exists() and venv_sp not in site_packages:
+        site_packages.append(venv_sp)
+
+    for sp in site_packages:
+        for pkg in ("cublas", "cudnn", "cuda_runtime"):
+            bin_dir = sp / "nvidia" / pkg / "bin"
+            if bin_dir.exists():
+                try:
+                    os.add_dll_directory(str(bin_dir))
+                    registered.append(str(bin_dir))
+                except Exception:
+                    pass
+                if str(bin_dir) not in os.environ.get("PATH", ""):
+                    os.environ["PATH"] = f"{bin_dir};{os.environ.get('PATH', '')}"
+
+    return registered
+
 
 def resolve_ffmpeg_binaries() -> Tuple[str, str]:
     """
@@ -81,4 +120,3 @@ def resolve_ffmpeg_binaries() -> Tuple[str, str]:
 
 
 FFMPEG_BIN, FFPROBE_BIN = resolve_ffmpeg_binaries()
-
