@@ -392,6 +392,7 @@ def detect_facecam(
     video_path: Path,
     min_face_size: int = 60,
     min_neighbors: int = 5,
+    vod_key: Optional[str] = None,
 ) -> Tuple[Optional[Tuple[float, float, float, float]], float]:
     """
     Extracts sample frames (at 20%, 40%, 60%, 80% of the clip duration) and runs OpenCV
@@ -401,9 +402,9 @@ def detect_facecam(
     - gaming_split is ONLY used when a consistent face belongs to a corner gaming webcam overlay
       (average face width < 0.16 of frame width AND face horizontal center x < 0.28 or x > 0.72).
     - When face is larger (>= 0.16 width) or centered in a full-screen IRL/podcast/studio shot
-      (e.g., sitting on a couch), returns (None, speaker_x_norm) to trigger dynamic center_crop
-      centering on speaker_x_norm.
-    - If no faces are detected at all, returns (None, 0.5).
+      (e.g., sitting on a couch), falls back to dynamic center_crop centering on speaker_x_norm.
+    - If Haar Cascade misses due to beard/hoodie/lighting, automatically queries Gemini Vision
+      with per-VOD caching to lock onto streamer facecams reliably.
 
     Returns:
         (cam_bbox, speaker_x_norm) where cam_bbox is (x, y, w, h) or None.
@@ -515,8 +516,18 @@ def detect_facecam(
         if avg_norm_w < 0.16 and (avg_cx < 0.28 or avg_cx > 0.72) and (avg_cy < 0.38 or avg_cy > 0.62):
             corner_cam_clusters.append(c)
 
-    # If no consistent cluster satisfies corner gaming webcam, switch to center_crop
+    # If no consistent cluster satisfies corner gaming webcam, try Gemini Vision fallback
     if not corner_cam_clusters:
+        try:
+            from modules.brain import detect_webcam_gemini_vision
+
+            has_vision_cam, vision_bbox = detect_webcam_gemini_vision(video_path, vod_key=vod_key)
+            if has_vision_cam and vision_bbox is not None:
+                logger.info("Gemini Vision detected corner webcam overlay at %s", vision_bbox)
+                return vision_bbox, speaker_x_norm
+        except Exception as exc:
+            logger.warning("Gemini Vision fallback detection failed: %s", exc)
+
         return None, speaker_x_norm
 
     # Select the best corner webcam cluster
@@ -569,6 +580,7 @@ def compose_clip(
     use_dramatic_punch: bool = False,
     bgm_path: Optional[Path] = None,
     enable_bgm: bool = True,
+    vod_key: Optional[str] = None,
     nvenc_preset: str = NVENC_PRESET,
     nvenc_cq: int = NVENC_CQ,
     nvenc_tune: str = NVENC_TUNE,
@@ -595,6 +607,7 @@ def compose_clip(
         use_dramatic_punch: Enables 1.12x center zoom and brightness pop at climax_offset.
         bgm_path: Optional custom path to background music .mp3.
         enable_bgm: Whether to mix background music (default True).
+        vod_key: Optional VOD identifier or URL for caching webcam detection across clips.
         nvenc_preset: NVENC preset (default "p6").
         nvenc_cq: Constant Quality target (default 18).
         nvenc_tune: NVENC tune profile (default "hq").
@@ -615,7 +628,7 @@ def compose_clip(
 
     # Smart Auto-Webcam Detection & Fallback if gaming_split is requested with default cam_bbox
     if layout == LayoutMode.GAMING_SPLIT and auto_detect_cam and cam_bbox == DEFAULT_WEBCAM_BBOX:
-        detected_cam, detected_speaker_x = detect_facecam(input_path)
+        detected_cam, detected_speaker_x = detect_facecam(input_path, vod_key=vod_key)
         if detected_cam is not None:
             cam_bbox = detected_cam
             logger.info("Auto-detected corner webcam region at %s", cam_bbox)

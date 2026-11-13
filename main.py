@@ -75,6 +75,14 @@ def parse_bbox_string(bbox_str: str) -> Tuple[float, float, float, float]:
         return DEFAULT_WEBCAM_BBOX
 
 
+CORNER_MAP: Dict[str, Tuple[float, float, float, float]] = {
+    "top-left": (0.0, 0.0, 0.32, 0.34),
+    "top-right": (0.68, 0.0, 0.32, 0.34),
+    "bottom-left": (0.0, 0.66, 0.32, 0.34),
+    "bottom-right": (0.68, 0.66, 0.32, 0.34),
+}
+
+
 @app.callback()
 def main_callback():
     """Ensure database, CUDA DLLs, and ffmpeg paths are ready before any command executes."""
@@ -109,6 +117,11 @@ def clip_video(
         "--cam-bbox",
         "--cam-box",
         help="Normalized webcam box 'x,y,w,h' for gaming_split (default top-left quadrant)",
+    ),
+    cam_corner: Optional[str] = typer.Option(
+        None,
+        "--cam-corner",
+        help="Webcam corner override: 'auto', 'top-left', 'bottom-left', 'top-right', 'bottom-right', 'none'",
     ),
     hook_title: Optional[str] = typer.Option(
         None,
@@ -200,10 +213,18 @@ def clip_video(
     effective_layout = layout
     effective_bbox = parsed_bbox
     effective_speaker_x = 0.5
+    norm_corner = cam_corner.lower().strip() if cam_corner else None
 
-    if layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
+    if norm_corner == "none":
+        effective_layout = LayoutMode.CENTER_CROP
+        console.print("[yellow]--cam-corner none specified -> forcing center_crop layout.[/yellow]")
+    elif norm_corner in CORNER_MAP:
+        effective_layout = LayoutMode.GAMING_SPLIT
+        effective_bbox = CORNER_MAP[norm_corner]
+        console.print(f"[green]✓ Manual webcam corner override ({norm_corner}):[/green] {effective_bbox} -> gaming_split")
+    elif layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
         with console.status("[bold blue]Analyzing video framing and webcam/speaker position..."):
-            detected_bbox, detected_speaker_x = detect_facecam(raw_path)
+            detected_bbox, detected_speaker_x = detect_facecam(raw_path, vod_key=url)
             if detected_bbox is not None:
                 effective_bbox = detected_bbox
                 console.print(f"[green]✓ Corner webcam face detected at normalized coordinates:[/green] {effective_bbox}")
@@ -308,6 +329,17 @@ def auto_clip_vod(
         "--cam-bbox",
         "--cam-box",
         help="Normalized webcam coordinates 'x,y,w,h' for gaming_split (default top-left quadrant)",
+    ),
+    cam_corner: Optional[str] = typer.Option(
+        None,
+        "--cam-corner",
+        help="Webcam corner override: 'auto', 'top-left', 'bottom-left', 'top-right', 'bottom-right', 'none'",
+    ),
+    prompt: Optional[str] = typer.Option(
+        None,
+        "--prompt",
+        "-p",
+        help="Custom steering directive for Gemini highlight detection (e.g. 'Find moments where CaseOh gets jumpscared')",
     ),
     whisper_model: Optional[str] = typer.Option(
         None,
@@ -436,8 +468,10 @@ def auto_clip_vod(
             console.print(f"[dim]Top energy spikes: {peak_summary}[/dim]")
 
     # Step 3: Gemini Viral Highlight Detection
-    console.rule("[bold cyan]Step 3: Gemini 2.5 Flash Viral Highlight Detection[/bold cyan]")
-    with console.status("[bold yellow]Analyzing retention drivers with Gemini 2.5 Flash..."):
+    console.rule("[bold cyan]Step 3: Gemini Viral Highlight Detection[/bold cyan]")
+    if prompt:
+        console.print(f"[dim cyan]User Prompt Steering Directive:[/dim cyan] [bold cyan]\"{prompt}\"[/bold cyan]")
+    with console.status("[bold yellow]Analyzing retention drivers with Gemini..."):
         try:
             analysis = detect_highlights(
                 transcript=transcript,
@@ -445,6 +479,7 @@ def auto_clip_vod(
                 min_duration=min_duration,
                 max_duration=max_duration,
                 top_k=max_clips,
+                user_prompt=prompt,
             )
         except Exception as exc:
             console.print(f"[bold red]Gemini Highlight Detection Failed:[/bold red] {exc}")
@@ -475,6 +510,9 @@ def auto_clip_vod(
     vod_output_dir = OUTPUTS_DIR / vod_folder_name
     vod_output_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"[dim]Output subfolder: [cyan]{vod_output_dir}[/cyan][/dim]")
+
+    vod_id = meta.get("id") or url
+    norm_corner = cam_corner.lower().strip() if cam_corner else None
 
     for idx, cand in enumerate(analysis.candidates, 1):
         dur = cand.end_time - cand.start_time
@@ -513,14 +551,23 @@ def auto_clip_vod(
 
         update_clip_record(clip_id, status="compositing")
 
-        # Resolve webcam & layout mode (distinguish corner gaming webcam vs studio/couch shot)
+        # Resolve webcam & layout mode with --cam-corner override & Gemini Vision fallback
         clip_layout = layout
         clip_bbox = parsed_bbox
         clip_speaker_x = 0.5
-        if layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
-            detected_bbox, detected_speaker_x = detect_facecam(raw_clip)
+
+        if norm_corner == "none":
+            clip_layout = LayoutMode.CENTER_CROP
+            console.print("  [yellow]--cam-corner none specified -> forcing center_crop layout[/yellow]")
+        elif norm_corner in CORNER_MAP:
+            clip_layout = LayoutMode.GAMING_SPLIT
+            clip_bbox = CORNER_MAP[norm_corner]
+            console.print(f"  [green]✓ Webcam Corner Override ({norm_corner}):[/green] {clip_bbox} -> gaming_split")
+        elif layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
+            detected_bbox, detected_speaker_x = detect_facecam(raw_clip, vod_key=vod_id)
             if detected_bbox is not None:
                 clip_bbox = detected_bbox
+                clip_layout = LayoutMode.GAMING_SPLIT
                 console.print(f"  [green]✓ Corner Facecam:[/green] detected at {clip_bbox} -> gaming_split")
             else:
                 clip_layout = LayoutMode.CENTER_CROP
@@ -589,6 +636,7 @@ def auto_clip_vod(
                 climax_offset=cand.climax_offset,
                 use_dramatic_punch=cand.use_dramatic_punch,
                 enable_bgm=bgm,
+                vod_key=vod_id,
             )
             console.print(f"  [green]✓ Rendered:[/green] {output_video.name}")
         except Exception as exc:

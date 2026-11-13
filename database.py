@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import DB_PATH
 
@@ -38,6 +38,16 @@ def init_db(db_path: Path = DB_PATH) -> None:
         use_dramatic_punch INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_clips_status ON clips(status);
+
+    CREATE TABLE IF NOT EXISTS vod_webcam_cache (
+        vod_key TEXT PRIMARY KEY,
+        has_corner_webcam INTEGER NOT NULL,
+        cam_x REAL,
+        cam_y REAL,
+        cam_w REAL,
+        cam_h REAL,
+        detected_at TEXT NOT NULL
+    );
     """
     with get_db_connection(db_path) as conn:
         conn.executescript(schema)
@@ -145,4 +155,52 @@ def list_clips(limit: int = 50, db_path: Path = DB_PATH) -> List[Dict[str, Any]]
     with get_db_connection(db_path) as conn:
         cursor = conn.execute(query, (limit,))
         return [dict(row) for row in cursor.fetchall()]
+
+
+def get_cached_webcam(
+    vod_key: str, db_path: Path = DB_PATH
+) -> Optional[Tuple[bool, Optional[Tuple[float, float, float, float]]]]:
+    """Retrieves cached webcam detection result for a VOD from SQLite."""
+    init_db(db_path)
+    query = "SELECT has_corner_webcam, cam_x, cam_y, cam_w, cam_h FROM vod_webcam_cache WHERE vod_key = ?"
+    with get_db_connection(db_path) as conn:
+        row = conn.execute(query, (vod_key,)).fetchone()
+        if not row:
+            return None
+        has_cam = bool(row["has_corner_webcam"])
+        if has_cam and row["cam_w"] is not None:
+            return True, (
+                float(row["cam_x"]),
+                float(row["cam_y"]),
+                float(row["cam_w"]),
+                float(row["cam_h"]),
+            )
+        return False, None
+
+
+def set_cached_webcam(
+    vod_key: str,
+    has_cam: bool,
+    bbox: Optional[Tuple[float, float, float, float]],
+    db_path: Path = DB_PATH,
+) -> None:
+    """Saves or updates cached webcam detection result for a VOD in SQLite."""
+    init_db(db_path)
+    now_iso = datetime.now().isoformat()
+    query = """
+    INSERT INTO vod_webcam_cache (vod_key, has_corner_webcam, cam_x, cam_y, cam_w, cam_h, detected_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(vod_key) DO UPDATE SET
+        has_corner_webcam = excluded.has_corner_webcam,
+        cam_x = excluded.cam_x,
+        cam_y = excluded.cam_y,
+        cam_w = excluded.cam_w,
+        cam_h = excluded.cam_h,
+        detected_at = excluded.detected_at
+    """
+    cam_x, cam_y, cam_w, cam_h = bbox if bbox else (None, None, None, None)
+    with get_db_connection(db_path) as conn:
+        conn.execute(query, (vod_key, 1 if has_cam else 0, cam_x, cam_y, cam_w, cam_h, now_iso))
+        conn.commit()
+
 

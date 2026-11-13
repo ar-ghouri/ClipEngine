@@ -8,13 +8,40 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, List, Literal, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field
 
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import GEMINI_API_KEY, GEMINI_MODEL, SPLIT_TOP_AR
+from database import get_cached_webcam, set_cached_webcam
 from modules.transcriber import AudioPeak, TranscriptionResult, WordTimestamp
 
 logger = logging.getLogger("clipengine.brain")
+
+
+class WebcamDetectionResult(BaseModel):
+    """Structured response from Gemini Vision for streamer webcam overlay detection."""
+
+    has_corner_webcam: bool = Field(
+        ...,
+        description="True if there is a picture-in-picture streamer webcam overlay box in one of the corners/edges, False if full-screen",
+    )
+    cam_x: float = Field(
+        default=0.0,
+        description="Normalized X coordinate (0.0 to 1.0) of top-left corner of the webcam box",
+    )
+    cam_y: float = Field(
+        default=0.0,
+        description="Normalized Y coordinate (0.0 to 1.0) of top-left corner of the webcam box",
+    )
+    cam_w: float = Field(
+        default=0.30,
+        description="Normalized width (0.0 to 1.0) of the webcam box",
+    )
+    cam_h: float = Field(
+        default=0.30,
+        description="Normalized height (0.0 to 1.0) of the webcam box",
+    )
 
 
 class ClipCandidate(BaseModel):
@@ -87,6 +114,150 @@ def init_gemini_client(api_key: Optional[str] = None) -> Any:
     return genai.Client(api_key=key)
 
 
+_MEMORY_WEBCAM_CACHE: Dict[str, Tuple[bool, Optional[Tuple[float, float, float, float]]]] = {}
+
+
+def detect_webcam_gemini_vision(
+    video_path: Path,
+    vod_key: Optional[str] = None,
+    api_key: Optional[str] = None,
+    model_name: str = GEMINI_MODEL,
+) -> Tuple[bool, Optional[Tuple[float, float, float, float]]]:
+    """
+    Extracts 1 full 16:9 JPEG frame from the middle of the video and queries Gemini Vision
+    to detect if a picture-in-picture streamer webcam overlay is present in any corner or edge.
+
+    Caches results per VOD (in-memory and SQLite) so only 1 vision query is made per stream.
+
+    Returns:
+        (has_corner_webcam, cam_bbox) where cam_bbox is normalized (cam_x, cam_y, cam_w, cam_h) or None.
+    """
+    import cv2
+    from google.genai import types
+
+    v_path = Path(video_path).resolve()
+    if not vod_key:
+        stem_parts = v_path.stem.split("_")
+        if len(stem_parts) >= 3 and len(stem_parts[2]) == 11:
+            vod_key = stem_parts[2]
+        else:
+            vod_key = v_path.stem
+
+    # 1. Check in-memory cache
+    if vod_key in _MEMORY_WEBCAM_CACHE:
+        logger.info("Using in-memory cached webcam detection for VOD '%s': %s", vod_key, _MEMORY_WEBCAM_CACHE[vod_key])
+        return _MEMORY_WEBCAM_CACHE[vod_key]
+
+    # 2. Check SQLite cache
+    cached = get_cached_webcam(vod_key)
+    if cached is not None:
+        logger.info("Using SQLite cached webcam detection for VOD '%s': %s", vod_key, cached)
+        _MEMORY_WEBCAM_CACHE[vod_key] = cached
+        return cached
+
+    # 3. Extract 1 frame from middle of video
+    if not v_path.exists():
+        logger.warning("Video file not found for vision detection: %s", v_path)
+        return False, None
+
+    cap = cv2.VideoCapture(str(v_path))
+    if not cap.isOpened():
+        logger.warning("cv2.VideoCapture could not open %s", v_path)
+        return False, None
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if total_frames <= 0 or src_w <= 0 or src_h <= 0:
+        cap.release()
+        return False, None
+
+    mid_idx = total_frames // 2
+    cap.set(cv2.CAP_PROP_POS_FRAMES, mid_idx)
+    ret, frame = cap.read()
+    cap.release()
+
+    if not ret or frame is None:
+        logger.warning("Failed to read middle frame for Gemini Vision webcam detection")
+        return False, None
+
+    ret, buf = cv2.imencode(".jpg", frame)
+    if not ret:
+        logger.warning("Failed to encode frame to JPEG for Gemini Vision")
+        return False, None
+    image_bytes = buf.tobytes()
+
+    client = init_gemini_client(api_key)
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+
+    prompt = (
+        "Does this livestream frame contain a picture-in-picture streamer webcam overlay box in one of the corners/edges, "
+        "or is it a full-screen shot? Return JSON: "
+        "{\"has_corner_webcam\": bool, \"cam_x\": float, \"cam_y\": float, \"cam_w\": float, \"cam_h\": float} "
+        "with normalized 0.0–1.0 coordinates of the streamer's webcam box (centered on the streamer's head/shoulders)."
+    )
+
+    candidate_models = [model_name]
+    for fallback in ("gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"):
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
+
+    detection_result: Optional[WebcamDetectionResult] = None
+    for m in candidate_models:
+        try:
+            logger.info("Querying Gemini Vision for streamer webcam detection using %s...", m)
+            response = client.models.generate_content(
+                model=m,
+                contents=[image_part, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=WebcamDetectionResult,
+                    temperature=0.1,
+                ),
+            )
+            if getattr(response, "parsed", None) is not None and isinstance(response.parsed, WebcamDetectionResult):
+                detection_result = response.parsed
+                break
+            elif response.text:
+                detection_result = WebcamDetectionResult.model_validate_json(response.text)
+                break
+        except Exception as exc:
+            logger.warning("Gemini Vision model %s failed: %s. Trying next fallback...", m, exc)
+
+    if detection_result is None or not detection_result.has_corner_webcam:
+        _MEMORY_WEBCAM_CACHE[vod_key] = (False, None)
+        set_cached_webcam(vod_key, False, None)
+        return False, None
+
+    # Handle pixel vs normalized coordinate outputs defensively
+    raw_x = detection_result.cam_x / src_w if detection_result.cam_x > 1.0 else detection_result.cam_x
+    raw_y = detection_result.cam_y / src_h if detection_result.cam_y > 1.0 else detection_result.cam_y
+    raw_w = detection_result.cam_w / src_w if detection_result.cam_w > 1.0 else detection_result.cam_w
+    raw_h = detection_result.cam_h / src_h if detection_result.cam_h > 1.0 else detection_result.cam_h
+
+    raw_x = max(0.0, min(1.0, raw_x))
+    raw_y = max(0.0, min(1.0, raw_y))
+    raw_w = max(0.05, min(1.0, raw_w))
+    raw_h = max(0.05, min(1.0, raw_h))
+
+    # Center of detected box
+    cx = raw_x + raw_w / 2.0
+    cy = raw_y + raw_h / 2.0
+
+    # Ensure box has comfortable framing for 1080x640 top slot (AR: 1.6875)
+    box_h = max(raw_h * 1.3, 0.32)
+    box_w = box_h * (src_h / src_w) * SPLIT_TOP_AR
+
+    box_x = max(0.0, min(1.0 - box_w, cx - box_w / 2.0))
+    box_y = max(0.0, min(1.0 - box_h, cy - box_h / 2.0))
+
+    final_bbox = (round(box_x, 4), round(box_y, 4), round(box_w, 4), round(box_h, 4))
+    _MEMORY_WEBCAM_CACHE[vod_key] = (True, final_bbox)
+    set_cached_webcam(vod_key, True, final_bbox)
+    logger.info("Gemini Vision detected corner webcam box at %s for VOD '%s'", final_bbox, vod_key)
+    return True, final_bbox
+
+
 def _generate_time_windows(
     total_duration: float,
     chunk_size: float = 1800.0,
@@ -126,6 +297,7 @@ def _detect_highlights_window(
     max_duration: float,
     num_candidates: int,
     model_name: str,
+    user_prompt: Optional[str] = None,
 ) -> HighlightAnalysisResult:
     """
     Analyzes a single time window [window_start, window_end] with Gemini structured outputs.
@@ -154,10 +326,19 @@ def _detect_highlights_window(
                 )
     peaks_text = "\n".join(peak_lines) if peak_lines else "None detected in this segment."
 
+    user_directive_block = ""
+    if user_prompt and user_prompt.strip():
+        user_directive_block = f"""
+### CRITICAL USER STEERING DIRECTIVE (HIGHEST PRIORITY):
+The user explicitly specified the following focus for this clip detection:
+"{user_prompt.strip()}"
+You MUST prioritize candidate moments that directly fulfill this request above all other considerations!
+"""
+
     prompt = f"""
 You are an elite short-form video editor specializing in viral TikToks, YouTube Shorts, and Instagram Reels.
 Your mission is to find the top {num_candidates} most engaging, high-retention moments from this stream segment [{window_start:.1f}s -> {window_end:.1f}s].
-
+{user_directive_block}
 ### CRITICAL RULES:
 1. QUANTITY: You MUST return EXACTLY {num_candidates} candidate clips (or up to {num_candidates} distinct non-overlapping moments if content allows). Do NOT return only 1 clip when multiple highlight moments exist!
 2. RAW SECONDS ONLY: All `start_time` and `end_time` fields in your JSON response MUST be raw seconds as floating-point numbers strictly within [{window_start:.1f}, {window_end:.1f}].
@@ -356,10 +537,12 @@ def detect_highlights(
     top_k: int = 3,
     api_key: Optional[str] = None,
     model_name: str = GEMINI_MODEL,
+    user_prompt: Optional[str] = None,
 ) -> HighlightAnalysisResult:
     """
     Evaluates transcript segments and audio loudness peaks using Gemini Flash
     with structured schema output to extract viral short-form clips.
+    Supports user_prompt steering directive for prioritizing specific types of moments.
 
     For streams exceeding 1800s (30 minutes), splits into 30-minute chunks with 30s overlap,
     runs Gemini per chunk, merges all candidates, deduplicates overlapping timestamps,
@@ -385,6 +568,7 @@ def detect_highlights(
             max_duration=max_duration,
             num_candidates=top_k,
             model_name=model_name,
+            user_prompt=user_prompt,
         )
         result.candidates = snap_to_word_boundaries(result.candidates, transcript)
         return result
@@ -412,6 +596,7 @@ def detect_highlights(
                 max_duration=max_duration,
                 num_candidates=candidates_per_window,
                 model_name=model_name,
+                user_prompt=user_prompt,
             )
             all_candidates.extend(window_result.candidates)
         except Exception as exc:
