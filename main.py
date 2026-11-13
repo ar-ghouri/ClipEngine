@@ -199,31 +199,28 @@ def clip_video(
     parsed_bbox = parse_bbox_string(cam_bbox)
     effective_layout = layout
     effective_bbox = parsed_bbox
+    effective_speaker_x = 0.5
 
     if layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
-        with console.status("[bold blue]Detecting streamer webcam face..."):
-            detected_bbox = detect_facecam(raw_path)
+        with console.status("[bold blue]Analyzing video framing and webcam/speaker position..."):
+            detected_bbox, detected_speaker_x = detect_facecam(raw_path)
             if detected_bbox is not None:
                 effective_bbox = detected_bbox
-                console.print(f"[green]✓ Webcam face detected at normalized coordinates:[/green] {effective_bbox}")
+                console.print(f"[green]✓ Corner webcam face detected at normalized coordinates:[/green] {effective_bbox}")
             else:
                 effective_layout = LayoutMode.CENTER_CROP
+                effective_speaker_x = detected_speaker_x
                 console.print(
-                    "[yellow]No facecam detected in video. "
-                    "Automatically switching layout to 'center_crop' and lower-third captions.[/yellow]"
+                    f"[yellow]Full-screen studio/couch shot detected (speaker X: {effective_speaker_x:.2f}). "
+                    "Automatically switching layout to speaker-centered 'center_crop' and lower-third captions.[/yellow]"
                 )
 
     # 5. Generate Karaoke Subtitles if enabled
     ass_file: Optional[Path] = None
     if captions:
         try:
-            clip_transcript = None
-            if fast_subs:
-                with console.status("[bold green]Checking YouTube auto-subtitles..."):
-                    clip_transcript = extract_youtube_captions(url)
-            if clip_transcript is None:
-                console.print("[bold magenta]Transcribing section via faster-whisper...[/bold magenta]")
-                clip_transcript = transcribe_audio(raw_path)
+            console.print("[bold magenta]Transcribing section via faster-whisper on RTX 4060...[/bold magenta]")
+            clip_transcript = transcribe_audio(raw_path)
 
             clip_words = [w for seg in clip_transcript.segments for w in seg.words]
             if clip_words:
@@ -256,6 +253,7 @@ def clip_video(
                 output_path=manual_output_file,
                 layout=effective_layout,
                 cam_bbox=effective_bbox,
+                speaker_x=effective_speaker_x,
                 ass_path=ass_file,
                 auto_detect_cam=False,
                 enable_bgm=bgm,
@@ -515,41 +513,63 @@ def auto_clip_vod(
 
         update_clip_record(clip_id, status="compositing")
 
-        # Resolve webcam & layout mode (smart auto-detection + fallback)
+        # Resolve webcam & layout mode (distinguish corner gaming webcam vs studio/couch shot)
         clip_layout = layout
         clip_bbox = parsed_bbox
+        clip_speaker_x = 0.5
         if layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
-            detected_bbox = detect_facecam(raw_clip)
+            detected_bbox, detected_speaker_x = detect_facecam(raw_clip)
             if detected_bbox is not None:
                 clip_bbox = detected_bbox
-                console.print(f"  [green]✓ Facecam:[/green] detected at {clip_bbox} -> gaming_split")
+                console.print(f"  [green]✓ Corner Facecam:[/green] detected at {clip_bbox} -> gaming_split")
             else:
                 clip_layout = LayoutMode.CENTER_CROP
+                clip_speaker_x = detected_speaker_x
                 console.print(
-                    "  [yellow]✓ Facecam:[/yellow] none detected -> fallback to center_crop"
+                    f"  [yellow]✓ Studio/Couch Framing:[/yellow] speaker X={clip_speaker_x:.2f} -> dynamic center_crop"
                 )
 
         # 4c. Generate zero-flicker karaoke subtitles + 3.5s hook banner
+        # Hybrid Fast-Discovery Workflow:
+        # When --fast-subs is used, YouTube transcript found viral timestamps in seconds (Step 2 & 3).
+        # In Step 4, run local RTX 4060 faster-whisper on the 40-50s clip audio (~1.5s) for pristine, uncensored word timestamps!
         ass_path: Optional[Path] = None
-        if captions and transcript.segments:
-            clip_words = [
-                w
-                for seg in transcript.segments
-                for w in seg.words
-                if w.end > cand.start_time and w.start < cand.end_time
-            ]
-            if clip_words:
-                ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
-                generate_ass_subtitles(
-                    words=clip_words,
-                    output_path=ass_file,
-                    clip_start=cand.start_time,
-                    clip_end=cand.end_time,
-                    layout=clip_layout.value,
-                    hook_title=cand.hook_title,
-                )
-                ass_path = ass_file
-                console.print(f"  [green]✓ Captions:[/green] {ass_file.name} (3.5s hook banner + karaoke)")
+        if captions:
+            try:
+                if fast_subs:
+                    console.print("  [bold magenta]Running local GPU Whisper on clip audio (~1.5s precision)...[/bold magenta]")
+                    clip_trans = transcribe_audio(raw_clip)
+                    clip_words = [w for seg in clip_trans.segments for w in seg.words]
+                    c_start = 0.0
+                    c_end = dur
+                elif transcript and transcript.segments:
+                    clip_words = [
+                        w
+                        for seg in transcript.segments
+                        for w in seg.words
+                        if w.end > cand.start_time and w.start < cand.end_time
+                    ]
+                    c_start = cand.start_time
+                    c_end = cand.end_time
+                else:
+                    clip_words = []
+                    c_start = 0.0
+                    c_end = dur
+
+                if clip_words:
+                    ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
+                    generate_ass_subtitles(
+                        words=clip_words,
+                        output_path=ass_file,
+                        clip_start=c_start,
+                        clip_end=c_end,
+                        layout=clip_layout.value,
+                        hook_title=cand.hook_title,
+                    )
+                    ass_path = ass_file
+                    console.print(f"  [green]✓ Captions:[/green] {ass_file.name} (uncensored GPU karaoke + hook)")
+            except Exception as exc:
+                console.print(f"  [yellow]Warning: Subtitle generation failed: {exc}[/yellow]")
 
         # Target output path: outputs/<sanitized_vod_title>/<index:02d>_<sanitized_hook_title>.mp4
         hook_clean = sanitize_title(cand.hook_title, max_chars=60)
@@ -562,6 +582,7 @@ def auto_clip_vod(
                 output_path=target_clip_output,
                 layout=clip_layout,
                 cam_bbox=clip_bbox,
+                speaker_x=clip_speaker_x,
                 ass_path=ass_path,
                 auto_detect_cam=False,
                 vibe=cand.vibe,

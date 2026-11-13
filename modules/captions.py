@@ -48,17 +48,38 @@ def format_ass_time(seconds: float) -> str:
 
 
 def clean_caption_text(text: str) -> str:
-    """Cleans word text, removing ASS curly brace overrides, stripping stray leading apostrophes and trailing commas, and capitalizing."""
-    cleaned = re.sub(r"[{}]", "", text).strip()
+    """Cleans word text, removing bracketed sound tags, ASS curly brace overrides, stripping stray leading apostrophes and trailing commas, and capitalizing."""
+    cleaned = re.sub(r"\[.*?\]", "", text).strip()
+    cleaned = re.sub(r"[{}]", "", cleaned).strip()
     cleaned = re.sub(r"^['’]+", "", cleaned)
     cleaned = re.sub(r",+$", "", cleaned).strip()
     return cleaned.upper()
 
 
+def strip_bracketed_tags(words: List[WordTimestamp]) -> List[WordTimestamp]:
+    """
+    Strips bracketed sound tags like [SCREAMING], [LAUGHTER], [MUSIC], [APPLAUSE], [ __ ]
+    from the WordTimestamp stream so they never appear in subtitles.
+    """
+    result: List[WordTimestamp] = []
+    for w in words:
+        cleaned_word = re.sub(r"\[.*?\]", "", w.word).strip()
+        if cleaned_word:
+            result.append(
+                WordTimestamp(
+                    word=cleaned_word,
+                    start=w.start,
+                    end=w.end,
+                    probability=w.probability,
+                )
+            )
+    return result
+
+
 def collapse_repetitions(words: List[WordTimestamp]) -> List[WordTimestamp]:
     """
-    Collapses 3+ consecutive identical words (e.g. 'NO, NO, NO, NO' or 'AHHHHH AHHHHH AHHHHH')
-    into a single emphasized word with an exclamation mark ('NO!' or 'AHHHHH!').
+    Collapses 2+ consecutive identical words (e.g. 'HOUSE HOUSE' -> 'HOUSE' or 'I I' -> 'I')
+    into a single word spanning the full timestamp range.
     """
     if not words:
         return []
@@ -78,9 +99,18 @@ def collapse_repetitions(words: List[WordTimestamp]) -> List[WordTimestamp]:
             j += 1
 
         count = j - i
-        if count >= 3:
+        if count >= 2:
+            last_word_raw = words[j - 1].word.strip()
             raw_clean = words[i].word.strip().rstrip(",.?!")
-            collapsed_word = f"{raw_clean}!"
+            if last_word_raw.endswith("?"):
+                collapsed_word = f"{raw_clean}?"
+            elif last_word_raw.endswith("!"):
+                collapsed_word = f"{raw_clean}!"
+            elif last_word_raw.endswith("."):
+                collapsed_word = f"{raw_clean}."
+            else:
+                collapsed_word = raw_clean
+
             result.append(
                 WordTimestamp(
                     word=collapsed_word,
@@ -163,7 +193,8 @@ def chunk_words(
     if not words:
         return []
 
-    # Preprocess words: merge contractions, clean leading apostrophes, and collapse 3+ repetitions
+    # Preprocess words: strip sound tags, merge contractions, and collapse 2+ repetitions
+    words = strip_bracketed_tags(words)
     words = normalize_contractions(words)
     words = collapse_repetitions(words)
 
