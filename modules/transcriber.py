@@ -249,7 +249,23 @@ def transcribe_audio(
     if not force_recompute and cache_path.exists():
         try:
             cached_data = json.loads(cache_path.read_text(encoding="utf-8"))
-            return TranscriptionResult.model_validate(cached_data)
+            cached_res = TranscriptionResult.model_validate(cached_data)
+            logger.info("Loaded transcript cache from %s", cache_path)
+            from rich.progress import BarColumn, Progress, TextColumn
+
+            tot_m = int(cached_res.duration // 60)
+            tot_s = int(cached_res.duration % 60)
+            with Progress(
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=25),
+                transient=False,
+            ) as progress:
+                desc = (
+                    f"Transcribing on RTX 4060: 100% • "
+                    f"{tot_m:02d}:{tot_s:02d} / {tot_m:02d}:{tot_s:02d} • speed (cached)"
+                )
+                progress.add_task(desc, total=int(cached_res.duration), completed=int(cached_res.duration))
+            return cached_res
         except Exception as exc:
             logger.warning(f"Failed to load transcript cache from {cache_path}: {exc}. Recomputing...")
 
@@ -263,31 +279,72 @@ def transcribe_audio(
         word_timestamps=word_timestamps,
     )
 
+    import time
+    from rich.progress import BarColumn, Progress, TextColumn
+
+    total_duration = round(info.duration, 2) if hasattr(info, "duration") and info.duration else 0.0
+    start_wall_time = time.time()
+
     segments: List[TranscriptSegment] = []
     seg_id = 1
-    for seg in raw_segments:
-        words: List[WordTimestamp] = []
-        if seg.words:
-            for w in seg.words:
-                words.append(
-                    WordTimestamp(
-                        word=w.word.strip(),
-                        start=round(w.start, 3),
-                        end=round(w.end, 3),
-                        probability=round(w.probability, 3) if hasattr(w, "probability") else 1.0,
-                    )
-                )
 
-        segments.append(
-            TranscriptSegment(
-                id=seg_id,
-                start=round(seg.start, 3),
-                end=round(seg.end, 3),
-                text=seg.text.strip(),
-                words=words,
-            )
+    with Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=25),
+        transient=False,
+    ) as progress:
+        tot_m = int(total_duration // 60)
+        tot_s = int(total_duration % 60)
+        task_id = progress.add_task(
+            f"Transcribing on RTX 4060:   0% • 00:00 / {tot_m:02d}:{tot_s:02d} • speed 0.0x",
+            total=total_duration if total_duration > 0 else 100.0,
         )
-        seg_id += 1
+
+        for seg in raw_segments:
+            words: List[WordTimestamp] = []
+            if seg.words:
+                for w in seg.words:
+                    words.append(
+                        WordTimestamp(
+                            word=w.word.strip(),
+                            start=round(w.start, 3),
+                            end=round(w.end, 3),
+                            probability=round(w.probability, 3) if hasattr(w, "probability") else 1.0,
+                        )
+                    )
+
+            segments.append(
+                TranscriptSegment(
+                    id=seg_id,
+                    start=round(seg.start, 3),
+                    end=round(seg.end, 3),
+                    text=seg.text.strip(),
+                    words=words,
+                )
+            )
+            seg_id += 1
+
+            # Update progress tracking
+            curr_t = min(total_duration, seg.end) if total_duration > 0 else seg.end
+            elapsed = max(0.001, time.time() - start_wall_time)
+            speed = curr_t / elapsed
+            pct = (curr_t / total_duration * 100.0) if total_duration > 0 else 0.0
+            cur_m = int(curr_t // 60)
+            cur_s = int(curr_t % 60)
+            desc = (
+                f"Transcribing on RTX 4060: {pct:2.0f}% • "
+                f"{cur_m:02d}:{cur_s:02d} / {tot_m:02d}:{tot_s:02d} • speed {speed:.1f}x"
+            )
+            progress.update(task_id, completed=curr_t, description=desc)
+
+        if total_duration > 0:
+            elapsed = max(0.001, time.time() - start_wall_time)
+            speed = total_duration / elapsed
+            desc = (
+                f"Transcribing on RTX 4060: 100% • "
+                f"{tot_m:02d}:{tot_s:02d} / {tot_m:02d}:{tot_s:02d} • speed {speed:.1f}x"
+            )
+            progress.update(task_id, completed=total_duration, description=desc)
 
     result = TranscriptionResult(
         audio_path=str(audio_path),

@@ -20,14 +20,20 @@ import cv2
 from config import (
     AUDIO_BITRATE,
     AUDIO_CODEC,
+    BGM_DIR,
     CANVAS_HEIGHT,
     CANVAS_WIDTH,
     DEFAULT_WEBCAM_BBOX,
     FFMPEG_BIN,
     FFPROBE_BIN,
+    NVENC_BITRATE,
     NVENC_CODEC,
     NVENC_CQ,
+    NVENC_MAXRATE,
+    NVENC_PIX_FMT,
     NVENC_PRESET,
+    NVENC_RC,
+    NVENC_TUNE,
     OUTPUTS_DIR,
     SPLIT_BOTTOM_AR,
     SPLIT_BOTTOM_HEIGHT,
@@ -39,6 +45,92 @@ from config import (
 
 logger = logging.getLogger("clipengine.compositor")
 
+# High-fidelity anti-haze sharpening & micro-contrast filter
+ANTI_HAZE_FILTER: str = (
+    "cas=0.6,unsharp=5:5:0.75:3:3:0.3,eq=contrast=1.05:saturation=1.10"
+)
+
+
+def ensure_default_bgm_tracks(bgm_dir: Path = BGM_DIR) -> Dict[str, Path]:
+    """
+    Ensures that default procedural background music loops exist in assets/bgm/.
+    Synthesizes 3 lightweight, royalty-free ambient/beat loops via FFmpeg lavfi
+    (hype_action.mp3, dramatic_tension.mp3, insightful_story.mp3, plus funny_reaction.mp3)
+    if the user has not placed custom .mp3 tracks yet.
+    """
+    bgm_dir.mkdir(parents=True, exist_ok=True)
+
+    presets: Dict[str, Tuple[str, str]] = {
+        "hype_action": (
+            "hype_action.mp3",
+            "sine=frequency=130:duration=30,tremolo=f=4.5:d=0.7,flanger=delay=5:speed=2,volume=0.25",
+        ),
+        "dramatic_tension": (
+            "dramatic_tension.mp3",
+            "sine=frequency=65:duration=30,tremolo=f=1.2:d=0.5,lowpass=f=250,volume=0.25",
+        ),
+        "insightful_story": (
+            "insightful_story.mp3",
+            "sine=frequency=220:duration=30,tremolo=f=0.8:d=0.4,aecho=0.8:0.88:60:0.4,lowpass=f=800,volume=0.20",
+        ),
+        "funny_reaction": (
+            "funny_reaction.mp3",
+            "sine=frequency=330:duration=30,tremolo=f=6.0:d=0.9,highpass=f=200,volume=0.20",
+        ),
+    }
+
+    result: Dict[str, Path] = {}
+    for vibe, (filename, filter_expr) in presets.items():
+        track_path = bgm_dir / filename
+        if not track_path.exists() or track_path.stat().st_size == 0:
+            logger.info("Synthesizing procedural BGM track for vibe '%s': %s", vibe, track_path.name)
+            cmd = [
+                FFMPEG_BIN,
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                filter_expr,
+                "-c:a",
+                "mp3",
+                "-b:a",
+                "128k",
+                str(track_path),
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+            except Exception as exc:
+                logger.warning("Failed to synthesize BGM track %s: %s", track_path, exc)
+        if track_path.exists():
+            result[vibe] = track_path
+
+    return result
+
+
+def resolve_bgm_track(vibe: Optional[str] = None, bgm_dir: Path = BGM_DIR) -> Optional[Path]:
+    """
+    Finds the best matching BGM track for the given vibe in assets/bgm/.
+    Falls back to hype_action or any existing .mp3 file in assets/bgm/.
+    """
+    ensure_default_bgm_tracks(bgm_dir)
+    if vibe:
+        vibe_key = vibe.lower()
+        candidate = bgm_dir / f"{vibe_key}.mp3"
+        if candidate.exists():
+            return candidate
+
+    # Fallback to hype_action
+    default_track = bgm_dir / "hype_action.mp3"
+    if default_track.exists():
+        return default_track
+
+    # Any mp3 in folder
+    any_mp3 = list(bgm_dir.glob("*.mp3"))
+    if any_mp3:
+        return any_mp3[0]
+
+    return None
+
 
 class LayoutMode(str, Enum):
     CENTER_CROP = "center_crop"
@@ -47,16 +139,15 @@ class LayoutMode(str, Enum):
 
 def probe_video(video_path: Path) -> Dict[str, Any]:
     """
-    Inspects input video streams using ffprobe to obtain exact geometry and duration.
+    Inspects input video streams using ffprobe to obtain exact geometry, duration,
+    and presence of audio tracks.
     """
     cmd = [
         FFPROBE_BIN,
         "-v",
         "error",
-        "-select_streams",
-        "v:0",
         "-show_entries",
-        "stream=width,height,r_frame_rate,duration",
+        "stream=codec_type,width,height,duration",
         "-show_entries",
         "format=duration",
         "-of",
@@ -71,13 +162,23 @@ def probe_video(video_path: Path) -> Dict[str, Any]:
     data = json.loads(result.stdout)
     streams = data.get("streams", [])
     if not streams:
+        raise ValueError(f"No media streams detected in {video_path}")
+
+    video_stream: Optional[Dict[str, Any]] = None
+    has_audio: bool = False
+    for s in streams:
+        if s.get("codec_type") == "video" and video_stream is None:
+            video_stream = s
+        elif s.get("codec_type") == "audio":
+            has_audio = True
+
+    if video_stream is None:
         raise ValueError(f"No video streams detected in {video_path}")
 
-    stream = streams[0]
-    width = int(stream["width"])
-    height = int(stream["height"])
+    width = int(video_stream["width"])
+    height = int(video_stream["height"])
 
-    duration_str = stream.get("duration") or data.get("format", {}).get("duration", "0")
+    duration_str = video_stream.get("duration") or data.get("format", {}).get("duration", "0")
     try:
         duration = float(duration_str)
     except (ValueError, TypeError):
@@ -88,6 +189,7 @@ def probe_video(video_path: Path) -> Dict[str, Any]:
         "height": height,
         "duration": duration,
         "aspect_ratio": width / height,
+        "has_audio": has_audio,
     }
 
 
@@ -206,35 +308,75 @@ def build_filtergraph(
     src_h: int,
     cam_bbox: Tuple[float, float, float, float] = DEFAULT_WEBCAM_BBOX,
     ass_path: Optional[Path] = None,
+    climax_offset: Optional[float] = None,
+    use_dramatic_punch: bool = False,
 ) -> str:
     """
     Constructs the FFmpeg complex filtergraph for the selected layout mode.
-    Guarantees square pixel SAR 1:1 and burns .ass subtitles if provided.
+    Guarantees square pixel SAR 1:1, Lanczos scaling, CAS 0.6 anti-haze sharpening,
+    optional Director FX climax zoom-punch & white-flash pop, and burns .ass subtitles if provided.
     """
+    t_climax = max(0.0, float(climax_offset)) if climax_offset is not None else 0.0
+    t_flash_end = t_climax + 0.15
+    t_zoom_end = t_climax + 2.5
+
     if layout == LayoutMode.CENTER_CROP:
-        # Standard 9:16 center crop
-        fg = (
-            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
-            f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT},"
-            f"setsar=1"
-        )
+        # Standard 9:16 center crop with Lanczos anti-haze upscaling & sharpening
+        if use_dramatic_punch and climax_offset is not None:
+            fg = (
+                f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+                f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:flags=lanczos,"
+                f"{ANTI_HAZE_FILTER},setsar=1[main_base];"
+                f"[main_base]split[main_pre][zsrc];"
+                f"[zsrc]crop=iw/1.12:ih/1.12:(iw-iw/1.12)/2:(ih-ih/1.12)/2,"
+                f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:flags=lanczos[zoomed];"
+                f"[main_pre][zoomed]overlay=0:0:enable='between(t,{t_climax:.3f},{t_zoom_end:.3f})',"
+                f"eq=brightness=0.18:enable='between(t,{t_climax:.3f},{t_flash_end:.3f})'"
+            )
+        else:
+            fg = (
+                f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,"
+                f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:flags=lanczos,"
+                f"{ANTI_HAZE_FILTER},setsar=1"
+            )
+
         if ass_path:
             fg += f",ass='{escape_ffmpeg_path(ass_path)}'"
         return fg + "[v]"
 
     elif layout == LayoutMode.GAMING_SPLIT:
-        # Top webcam slot: 1080x640
+        # Top webcam slot: 1080x640 with Lanczos + CAS 0.6 anti-haze sharpening
         top_w, top_h, top_x, top_y = calculate_webcam_crop(src_w, src_h, cam_bbox)
         # Bottom gameplay slot: 1080x1280
         bot_w, bot_h, bot_x, bot_y = calculate_gameplay_crop(src_w, src_h)
 
-        fg = (
-            f"[0:v]crop={top_w}:{top_h}:{top_x}:{top_y},"
-            f"scale={SPLIT_TOP_WIDTH}:{SPLIT_TOP_HEIGHT},setsar=1[top];"
-            f"[0:v]crop={bot_w}:{bot_h}:{bot_x}:{bot_y},"
-            f"scale={SPLIT_BOTTOM_WIDTH}:{SPLIT_BOTTOM_HEIGHT},setsar=1[bottom];"
-            f"[top][bottom]vstack=inputs=2,setsar=1"
-        )
+        if use_dramatic_punch and climax_offset is not None:
+            # Apply 1.12x center zoom-in and 0.15s white-flash brightness pop to the gameplay layer
+            fg = (
+                f"[0:v]crop={top_w}:{top_h}:{top_x}:{top_y},"
+                f"scale={SPLIT_TOP_WIDTH}:{SPLIT_TOP_HEIGHT}:flags=lanczos,"
+                f"{ANTI_HAZE_FILTER},setsar=1[top];"
+                f"[0:v]crop={bot_w}:{bot_h}:{bot_x}:{bot_y},"
+                f"scale={SPLIT_BOTTOM_WIDTH}:{SPLIT_BOTTOM_HEIGHT}:flags=lanczos,"
+                f"{ANTI_HAZE_FILTER},setsar=1[bot_base];"
+                f"[bot_base]split[bot_main][bot_zsrc];"
+                f"[bot_zsrc]crop=iw/1.12:ih/1.12:(iw-iw/1.12)/2:(ih-ih/1.12)/2,"
+                f"scale={SPLIT_BOTTOM_WIDTH}:{SPLIT_BOTTOM_HEIGHT}:flags=lanczos[bot_zoomed];"
+                f"[bot_main][bot_zoomed]overlay=0:0:enable='between(t,{t_climax:.3f},{t_zoom_end:.3f})',"
+                f"eq=brightness=0.18:enable='between(t,{t_climax:.3f},{t_flash_end:.3f})'[bottom];"
+                f"[top][bottom]vstack=inputs=2,setsar=1"
+            )
+        else:
+            fg = (
+                f"[0:v]crop={top_w}:{top_h}:{top_x}:{top_y},"
+                f"scale={SPLIT_TOP_WIDTH}:{SPLIT_TOP_HEIGHT}:flags=lanczos,"
+                f"{ANTI_HAZE_FILTER},setsar=1[top];"
+                f"[0:v]crop={bot_w}:{bot_h}:{bot_x}:{bot_y},"
+                f"scale={SPLIT_BOTTOM_WIDTH}:{SPLIT_BOTTOM_HEIGHT}:flags=lanczos,"
+                f"{ANTI_HAZE_FILTER},setsar=1[bottom];"
+                f"[top][bottom]vstack=inputs=2,setsar=1"
+            )
+
         if ass_path:
             fg += f",ass='{escape_ffmpeg_path(ass_path)}'"
         return fg + "[v]"
@@ -398,12 +540,23 @@ def compose_clip(
     cam_bbox: Tuple[float, float, float, float] = DEFAULT_WEBCAM_BBOX,
     ass_path: Optional[Path] = None,
     auto_detect_cam: bool = True,
+    vibe: Optional[str] = None,
+    climax_offset: Optional[float] = None,
+    use_dramatic_punch: bool = False,
+    bgm_path: Optional[Path] = None,
+    enable_bgm: bool = True,
     nvenc_preset: str = NVENC_PRESET,
     nvenc_cq: int = NVENC_CQ,
+    nvenc_tune: str = NVENC_TUNE,
+    nvenc_rc: str = NVENC_RC,
+    nvenc_bitrate: str = NVENC_BITRATE,
+    nvenc_maxrate: str = NVENC_MAXRATE,
+    nvenc_pix_fmt: str = NVENC_PIX_FMT,
 ) -> Path:
     """
     Composites a 9:16 vertical video clip using NVIDIA NVENC hardware acceleration
-    with optional single-pass burning of .ass karaoke subtitles.
+    with optional single-pass burning of .ass karaoke subtitles, Director FX zoom-punch,
+    and auto-ducked procedural background music.
 
     Args:
         input_video: Path to the raw downloaded video section.
@@ -412,8 +565,18 @@ def compose_clip(
         cam_bbox: Normalized (x, y, w, h) for webcam region in gaming_split.
         ass_path: Optional path to .ass subtitle script to burn in single pass.
         auto_detect_cam: When True and cam_bbox is default, auto-detects webcam face and falls back to center_crop if faceless.
-        nvenc_preset: NVENC preset (e.g. "p4").
-        nvenc_cq: Constant Quality target (e.g. 23).
+        vibe: Highlight tone for BGM selection ("hype_action", "funny_reaction", "dramatic_tension", "insightful_story").
+        climax_offset: Relative seconds to apply Director FX zoom-punch.
+        use_dramatic_punch: Enables 1.12x center zoom and brightness pop at climax_offset.
+        bgm_path: Optional custom path to background music .mp3.
+        enable_bgm: Whether to mix background music (default True).
+        nvenc_preset: NVENC preset (default "p6").
+        nvenc_cq: Constant Quality target (default 18).
+        nvenc_tune: NVENC tune profile (default "hq").
+        nvenc_rc: Rate control mode (default "vbr").
+        nvenc_bitrate: Target video bitrate (default "10M").
+        nvenc_maxrate: Peak video bitrate (default "15M").
+        nvenc_pix_fmt: Pixel format (default "yuv420p").
 
     Returns:
         Path to the finished 1080x1920 MP4 file.
@@ -442,38 +605,88 @@ def compose_clip(
         output_path = Path(output_path).resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Probe input dimensions
+    # Probe input dimensions and streams
     probe_info = probe_video(input_path)
     src_w = probe_info["width"]
     src_h = probe_info["height"]
+    has_audio = probe_info.get("has_audio", False)
 
-    filtergraph = build_filtergraph(layout, src_w, src_h, cam_bbox, ass_path=ass_path)
+    # Build video filtergraph with anti-haze Lanczos upscaling & optional Director FX
+    video_filtergraph = build_filtergraph(
+        layout=layout,
+        src_w=src_w,
+        src_h=src_h,
+        cam_bbox=cam_bbox,
+        ass_path=ass_path,
+        climax_offset=climax_offset,
+        use_dramatic_punch=use_dramatic_punch,
+    )
+
+    # Resolve BGM track if enabled
+    effective_bgm: Optional[Path] = None
+    if enable_bgm:
+        if bgm_path is not None and Path(bgm_path).exists():
+            effective_bgm = Path(bgm_path).resolve()
+        else:
+            effective_bgm = resolve_bgm_track(vibe)
 
     cmd = [
         FFMPEG_BIN,
         "-y",
         "-i",
         str(input_path),
+    ]
+
+    audio_maps: List[str] = []
+    if effective_bgm is not None:
+        cmd.extend(["-stream_loop", "-1", "-i", str(effective_bgm)])
+        if has_audio:
+            # Ducked BGM mixed under speech (-18 dB volume ducking + sidechain compressor)
+            combined_filter = (
+                f"{video_filtergraph};"
+                f"[0:a]asplit[voice1][voice2];"
+                f"[1:a]volume=0.12[bgm];"
+                f"[bgm][voice1]sidechaincompress=threshold=0.08:ratio=4:attack=20:release=300[ducked];"
+                f"[voice2][ducked]amix=inputs=2:duration=first:dropout_transition=2[a]"
+            )
+            audio_maps = ["-map", "[a]"]
+        else:
+            combined_filter = f"{video_filtergraph};[1:a]volume=0.20[a]"
+            audio_maps = ["-map", "[a]", "-shortest"]
+    else:
+        combined_filter = video_filtergraph
+        audio_maps = ["-map", "0:a?"]
+
+    cmd.extend([
         "-filter_complex",
-        filtergraph,
+        combined_filter,
         "-map",
         "[v]",
-        "-map",
-        "0:a?",
+    ])
+    cmd.extend(audio_maps)
+    cmd.extend([
         "-c:v",
         NVENC_CODEC,
         "-preset",
         nvenc_preset,
+        "-tune",
+        nvenc_tune,
+        "-rc",
+        nvenc_rc,
         "-cq",
         str(nvenc_cq),
+        "-b:v",
+        nvenc_bitrate,
+        "-maxrate",
+        nvenc_maxrate,
         "-pix_fmt",
-        "yuv420p",
+        nvenc_pix_fmt,
         "-c:a",
         AUDIO_CODEC,
         "-b:a",
         AUDIO_BITRATE,
         str(output_path),
-    ]
+    ])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:

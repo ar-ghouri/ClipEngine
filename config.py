@@ -17,11 +17,14 @@ from dotenv import load_dotenv
 BASE_DIR: Path = Path(__file__).resolve().parent
 DOWNLOADS_DIR: Path = BASE_DIR / "downloads"
 OUTPUTS_DIR: Path = BASE_DIR / "outputs"
+ASSETS_DIR: Path = BASE_DIR / "assets"
+BGM_DIR: Path = ASSETS_DIR / "bgm"
 DB_PATH: Path = BASE_DIR / "clipengine.db"
 
 # Ensure runtime directories exist
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+BGM_DIR.mkdir(parents=True, exist_ok=True)
 
 # Load environment variables
 load_dotenv(BASE_DIR / ".env")
@@ -50,8 +53,13 @@ DEFAULT_WEBCAM_BBOX: Tuple[float, float, float, float] = (0.0, 0.0, 0.25, 0.25)
 
 # Hardware Encoding Settings (Optimized for NVIDIA RTX 4060 8GB VRAM)
 NVENC_CODEC: str = "h264_nvenc"
-NVENC_PRESET: str = "p4"       # Balanced medium preset
-NVENC_CQ: int = 23             # Constant Quality level for NVENC VBR
+NVENC_PRESET: str = "p6"       # High-quality slower preset (p6)
+NVENC_TUNE: str = "hq"         # High-quality tune
+NVENC_RC: str = "vbr"          # Variable bitrate with CQ target
+NVENC_CQ: int = 18             # Razor-sharp constant quality level
+NVENC_BITRATE: str = "10M"     # Target video bitrate
+NVENC_MAXRATE: str = "15M"     # Maximum peak bitrate
+NVENC_PIX_FMT: str = "yuv420p" # Broad compatibility pixel format
 AUDIO_CODEC: str = "aac"
 AUDIO_BITRATE: str = "192k"
 
@@ -62,7 +70,7 @@ WHISPER_COMPUTE_TYPE: str = "float16"
 WHISPER_VAD_FILTER: bool = True
 
 # Stage 3: Gemini Highlight Detection Settings
-GEMINI_MODEL: str = "gemini-2.5-flash"
+GEMINI_MODEL: str = "gemini-3.1-flash-lite"
 
 
 def register_cuda_dlls() -> List[str]:

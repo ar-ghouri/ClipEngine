@@ -7,6 +7,7 @@ Renders TikTok / Shorts / Reels style animated word-by-word highlighted captions
 from __future__ import annotations
 
 import re
+import textwrap
 from pathlib import Path
 from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
@@ -263,7 +264,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{style.font_name},{style.font_size},{style.primary_color},&H000000FF,{style.outline_color},{style.shadow_color},-1,0,0,0,100,100,0,0,1,{style.outline_width},{style.shadow_width},{alignment},40,40,{margin_v},1
-Style: HookBanner,Arial Black,54,&H00FFFFFF,&H000000FF,&H00000000,&H20000000,-1,0,0,0,100,100,0,0,3,14,0,5,40,40,0,1
+Style: HookBanner,Arial Black,46,&H00FFFFFF,&H000000FF,&H00000000,&H20000000,-1,0,0,0,100,100,0,0,3,14,0,5,40,40,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -278,14 +279,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     events: List[str] = []
 
-    # 3.5s Viral Hook Title Overlay Banner
+    # 3.5s Viral Hook Title Overlay Banner (Word-wrapped to prevent horizontal overflow past 1080px)
     if hook_title:
         clean_hook = re.sub(r"[{}]", "", hook_title).strip().upper()
+        # Wrap at word boundaries at width=26, cap at 2 lines max, join with \N
+        wrapped_lines = textwrap.wrap(clean_hook, width=26)
+        if len(wrapped_lines) > 2:
+            wrapped_text = r"\N".join(wrapped_lines[:2])
+        else:
+            wrapped_text = r"\N".join(wrapped_lines) if wrapped_lines else clean_hook
+
         # For gaming_split: \pos(540,735) (top of gameplay zone)
         # For center_crop: \pos(540,260) (upper third safe zone)
         banner_pos = r"\pos(540,735)" if is_gaming_split else r"\pos(540,260)"
         events.append(
-            f"Dialogue: 1,0:00:00.00,0:00:03.50,HookBanner,,0,0,0,,{{{banner_pos}\\fad(0,250)}}{clean_hook}"
+            f"Dialogue: 1,0:00:00.00,0:00:03.50,HookBanner,,0,0,0,,{{{banner_pos}\\fad(0,250)}}{wrapped_text}"
         )
 
     for chunk_idx, chunk in enumerate(chunks):

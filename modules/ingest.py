@@ -11,11 +11,12 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import yt_dlp
 
 from config import DOWNLOADS_DIR, FFMPEG_BIN
+from modules.transcriber import TranscriptionResult, TranscriptSegment, WordTimestamp
 
 
 def parse_timestamp(time_val: Union[float, int, str]) -> float:
@@ -131,15 +132,17 @@ def download_target_clip(
     clean_end = re.sub(r"[:.]", "_", end_formatted)
 
     # Check if this exact section was already downloaded
-    existing_section = list(output_dir.glob(f"*_{clean_start}_{clean_end}.mp4"))
+    existing_section = [
+        f for f in output_dir.glob(f"*_{clean_start}_{clean_end}.*")
+        if f.suffix.lower() in [".mp4", ".mkv", ".webm"] and f.exists() and f.stat().st_size > 50000
+    ]
     for f in existing_section:
-        if f.exists() and f.stat().st_size > 50000:
-            target_f = output_dir / f"{prefix}_{f.name.split('_', 2)[-1]}"
-            if target_f != f:
-                import shutil
-                shutil.copy2(f, target_f)
-                return target_f.resolve()
-            return f.resolve()
+        target_f = output_dir / f"{prefix}_{f.name.split('_', 2)[-1]}"
+        if target_f != f:
+            import shutil
+            shutil.copy2(f, target_f)
+            return target_f.resolve()
+        return f.resolve()
 
     out_template = str(output_dir / f"{prefix}_%(id)s_{clean_start}_{clean_end}.%(ext)s")
     ffmpeg_dir = str(Path(FFMPEG_BIN).parent)
@@ -156,7 +159,7 @@ def download_target_clip(
         "--fragment-retries",
         "3",
         "-f",
-        "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        "bestvideo[height<=1440]+bestaudio/best[height<=1440]",
         "--merge-output-format",
         "mp4",
         "--ffmpeg-location",
@@ -178,15 +181,20 @@ def download_target_clip(
             )
 
     # Resolve resulting file on disk
-    expected_pattern = f"{prefix}_*_{clean_start}_{clean_end}.mp4"
-    matched_files = list(output_dir.glob(expected_pattern))
+    expected_pattern = f"{prefix}_*_{clean_start}_{clean_end}.*"
+    matched_files = [
+        f for f in output_dir.glob(expected_pattern)
+        if f.suffix.lower() in [".mp4", ".mkv", ".webm"]
+    ]
     if not matched_files:
-        # Fallback search for recently created mp4 in output_dir
-        mp4_files = sorted(
-            output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True
+        # Fallback search for recently created mp4/mkv in output_dir
+        candidate_files = sorted(
+            [f for f in output_dir.glob("*.*") if f.suffix.lower() in [".mp4", ".mkv", ".webm"]],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
         )
-        if mp4_files:
-            return mp4_files[0].resolve()
+        if candidate_files:
+            return candidate_files[0].resolve()
         raise FileNotFoundError(
             f"Downloaded clip not found matching pattern '{expected_pattern}' in {output_dir}."
         )
@@ -270,4 +278,136 @@ def download_audio_only(
         )
 
     return matched_files[0].resolve()
+
+
+def extract_youtube_captions(
+    url: str,
+    output_dir: Path = DOWNLOADS_DIR,
+    prefix: str = "yt_subs",
+) -> Optional[TranscriptionResult]:
+    """
+    Fast-path subtitle extraction using yt-dlp without downloading media.
+    Fetches YouTube .json3 auto-subtitles (or manual captions) with word timestamps
+    and converts them into a TranscriptionResult in ~3 seconds.
+
+    Args:
+        url: Source YouTube video URL.
+        output_dir: Destination folder for temporary .json3 subtitles.
+        prefix: Subtitle file prefix.
+
+    Returns:
+        TranscriptionResult if captions are available, otherwise None.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_template = str(output_dir / f"{prefix}_%(id)s.%(ext)s")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--write-auto-subs",
+        "--write-subs",
+        "--sub-format",
+        "json3",
+        "--sub-langs",
+        "en.*,en,all",
+        "--skip-download",
+        "--no-warnings",
+        "--quiet",
+        "-o",
+        out_template,
+        url,
+    ]
+
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+    except Exception:
+        return None
+
+    # Search for downloaded json3 files matching prefix
+    sub_files = sorted(
+        output_dir.glob(f"{prefix}_*.json3"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not sub_files:
+        return None
+
+    json_file = sub_files[0]
+    try:
+        import json
+
+        data = json.loads(json_file.read_text(encoding="utf-8"))
+        events = data.get("events", [])
+        if not events:
+            return None
+
+        segments: List[TranscriptSegment] = []
+        seg_id = 1
+        total_duration = 0.0
+
+        for ev in events:
+            if "segs" not in ev:
+                continue
+            start_ms = ev.get("tStartMs", 0)
+            dur_ms = ev.get("dDurationMs", 0)
+            raw_segs = ev["segs"]
+
+            words: List[WordTimestamp] = []
+            text_pieces: List[str] = []
+
+            for i, s in enumerate(raw_segs):
+                w_text = s.get("utf8", "")
+                clean_w = w_text.replace("\n", " ").strip()
+                clean_w = re.sub(r"^>>\s*", "", clean_w).strip()
+                if not clean_w:
+                    continue
+
+                t_offset = s.get("tOffsetMs", 0)
+                w_start = round((start_ms + t_offset) / 1000.0, 3)
+
+                # Estimate word end boundary
+                if i + 1 < len(raw_segs):
+                    next_offset = raw_segs[i + 1].get("tOffsetMs", t_offset + 300)
+                    w_end = round((start_ms + next_offset) / 1000.0, 3)
+                else:
+                    w_end = round((start_ms + dur_ms) / 1000.0, 3)
+
+                if w_end <= w_start:
+                    w_end = round(w_start + 0.35, 3)
+                elif w_end > w_start + 1.5:
+                    w_end = round(w_start + 0.8, 3)
+
+                words.append(WordTimestamp(word=clean_w, start=w_start, end=w_end, probability=1.0))
+                text_pieces.append(clean_w)
+                total_duration = max(total_duration, w_end)
+
+            if not words:
+                continue
+
+            full_seg_text = " ".join(text_pieces)
+            seg_start = words[0].start
+            seg_end = words[-1].end
+            segments.append(
+                TranscriptSegment(
+                    id=seg_id,
+                    start=seg_start,
+                    end=seg_end,
+                    text=full_seg_text,
+                    words=words,
+                )
+            )
+            seg_id += 1
+
+        if not segments:
+            return None
+
+        return TranscriptionResult(
+            audio_path=f"fast_subs://{url}",
+            language="en",
+            duration=round(total_duration, 2),
+            segments=segments,
+        )
+    except Exception:
+        return None
 

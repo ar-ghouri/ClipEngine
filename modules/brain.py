@@ -7,11 +7,12 @@ Uses official google-genai SDK with Structured JSON Outputs.
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional, Tuple
+import re
+from typing import Any, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
-from modules.transcriber import AudioPeak, TranscriptionResult
+from modules.transcriber import AudioPeak, TranscriptionResult, WordTimestamp
 
 logger = logging.getLogger("clipengine.brain")
 
@@ -44,6 +45,18 @@ class ClipCandidate(BaseModel):
     suggested_hashtags: List[str] = Field(
         default_factory=list,
         description="Up to 3 high-relevance hashtags",
+    )
+    vibe: Literal["hype_action", "funny_reaction", "dramatic_tension", "insightful_story"] = Field(
+        default="hype_action",
+        description="Vibe/category of the highlight for visual pacing and background music selection",
+    )
+    climax_offset: float = Field(
+        default=0.0,
+        description="Seconds relative to start_time where the biggest peak/scream/punchline occurs",
+    )
+    use_dramatic_punch: bool = Field(
+        default=False,
+        description="True only when a zoom-punch / flash transition at climax_offset genuinely elevates the moment",
     )
 
 
@@ -155,6 +168,13 @@ Your mission is to find the top {num_candidates} most engaging, high-retention m
 6. HOOK TITLE: Generate an intriguing, curiosity-gap title under 60 characters (e.g. "He didn't realize the mic was on...", "The 1 in a million shot that broke him"). NO cringe hashtag spam.
 7. INDEPENDENT VALUE: Every clip must make sense on its own with clear setup, action, and resolution/punchline.
 8. NO OVERLAPS: Candidate clips must not overlap each other.
+9. VIBE CLASSIFICATION: Classify each candidate's `vibe` into exactly one of:
+   - "hype_action": fast-paced gameplay action, scream/rage, clutch win, celebration
+   - "funny_reaction": comedic fail, hilarious banter, unexpected meme moment, laughing fit
+   - "dramatic_tension": intense suspense, high stakes, close call, nail-biting buildup
+   - "insightful_story": storytelling, intriguing life advice, podcast discussion, deep commentary
+10. CLIMAX TIMING (`climax_offset`): Pinpoint the exact second of maximum impact/punchline/scream, expressed in relative seconds from `start_time` (e.g., if clip starts at 42.0s and the peak occurs at 54.5s, `climax_offset` = 12.5). Use the Audio Loudness Spikes to help pinpoint the exact peak.
+11. DRAMATIC PUNCH (`use_dramatic_punch`): Set to `true` ONLY if a sudden 1.12x zoom-punch and subtle white-flash pop at `climax_offset` will heighten viewer engagement (e.g. explosive screams, sudden clutch kills, shocking fails). Set to `false` for calm, thoughtful, or conversational clips.
 
 ### AUDIO LOUDNESS SPIKES (Screams, Laughter, Hype):
 {peaks_text}
@@ -164,7 +184,7 @@ Your mission is to find the top {num_candidates} most engaging, high-retention m
 """
 
     candidate_models = [model_name]
-    for fallback in ("gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.5-flash"):
+    for fallback in ("gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"):
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 
@@ -216,10 +236,116 @@ Your mission is to find the top {num_candidates} most engaging, high-retention m
         if duration < 10.0:
             logger.warning(f"Candidate '{cand.hook_title}' too short ({duration:.1f}s), skipping.")
             continue
+
+        # Sanitize climax_offset bounds
+        if cand.climax_offset < 0.0 or cand.climax_offset > duration:
+            cand.climax_offset = round(duration * 0.65, 2)
+        else:
+            cand.climax_offset = round(cand.climax_offset, 2)
+
         valid_candidates.append(cand)
 
     result.candidates = valid_candidates[:num_candidates]
     return result
+
+
+def snap_to_word_boundaries(
+    candidates: List[ClipCandidate],
+    transcript: TranscriptionResult,
+) -> List[ClipCandidate]:
+    """
+    Snaps candidate clip start and end timestamps to exact sentence boundaries
+    and word alignments from the transcript, with smooth audio padding.
+
+    - Start snap: Finds sentence starters within ±2.5s of candidate.start_time
+      (first word of transcript, word following .?!, or word after a pause > 0.35s).
+      Applies -0.25s padding (max 0.0) for a clean audio lead-in.
+    - End snap: Finds sentence enders within ±2.5s of candidate.end_time
+      (word ending in .?!, last word of transcript, or word before a pause > 0.35s).
+      Applies +0.45s padding (min total_duration) for a natural breathing finish.
+    - Fallback: Snaps to nearest word boundary if no sentence boundary is in range.
+    """
+    all_words: List[WordTimestamp] = []
+    for seg in transcript.segments:
+        all_words.extend(seg.words)
+
+    if not all_words:
+        return candidates
+
+    total_duration = transcript.duration if transcript.duration > 0 else 0.0
+
+    # Identify sentence starters:
+    # 1. First word of transcript
+    # 2. Word immediately following sentence-ending punctuation (. ? !)
+    # 3. Word preceded by an inter-word pause > 0.35s
+    starters: List[WordTimestamp] = []
+    for i, w in enumerate(all_words):
+        if i == 0:
+            starters.append(w)
+        elif re.search(r"[.?!][\"']?$", all_words[i - 1].word.strip()):
+            starters.append(w)
+        elif (w.start - all_words[i - 1].end) > 0.35:
+            starters.append(w)
+
+    # Identify sentence enders:
+    # 1. Word ending in sentence-ending punctuation (. ? !)
+    # 2. Last word of transcript
+    # 3. Word followed by an inter-word pause > 0.35s
+    enders: List[WordTimestamp] = []
+    for i, w in enumerate(all_words):
+        if i == len(all_words) - 1:
+            enders.append(w)
+        elif re.search(r"[.?!][\"']?$", w.word.strip()):
+            enders.append(w)
+        elif (i + 1 < len(all_words)) and ((all_words[i + 1].start - w.end) > 0.35):
+            enders.append(w)
+
+    for cand in candidates:
+        orig_start = cand.start_time
+        orig_end = cand.end_time
+
+        # Start snap within ±2.5s
+        matching_starters = [w for w in starters if abs(w.start - orig_start) <= 2.5]
+        if matching_starters:
+            best_starter = min(matching_starters, key=lambda w: abs(w.start - orig_start))
+            snapped_start = max(0.0, best_starter.start - 0.25)
+        else:
+            # Fallback to nearest word boundary
+            best_word = min(all_words, key=lambda w: abs(w.start - orig_start))
+            snapped_start = max(0.0, best_word.start - 0.25)
+
+        # End snap within ±2.5s
+        matching_enders = [w for w in enders if abs(w.end - orig_end) <= 2.5]
+        max_end_bound = total_duration if total_duration > 0 else (orig_end + 10.0)
+        if matching_enders:
+            best_ender = min(matching_enders, key=lambda w: abs(w.end - orig_end))
+            snapped_end = min(max_end_bound, best_ender.end + 0.45)
+        else:
+            # Fallback to nearest word boundary
+            best_word = min(all_words, key=lambda w: abs(w.end - orig_end))
+            snapped_end = min(max_end_bound, best_word.end + 0.45)
+
+        # Ensure valid window duration
+        if snapped_end > snapped_start + 5.0:
+            orig_climax_abs = orig_start + cand.climax_offset
+            cand.start_time = round(snapped_start, 2)
+            cand.end_time = round(snapped_end, 2)
+            new_dur = cand.end_time - cand.start_time
+            cand.climax_offset = round(
+                max(0.0, min(max(0.0, new_dur - 0.5), orig_climax_abs - cand.start_time)), 2
+            )
+            logger.info(
+                f"Snapped '{cand.hook_title}': [{orig_start:.2f}s -> {orig_end:.2f}s] to "
+                f"[{cand.start_time:.2f}s -> {cand.end_time:.2f}s] "
+                f"(duration: {new_dur:.2f}s, climax: {cand.climax_offset:.2f}s)"
+            )
+        else:
+            logger.warning(
+                f"Snapping resulted in invalid duration for '{cand.hook_title}' "
+                f"[{snapped_start:.2f}s -> {snapped_end:.2f}s], retaining original."
+            )
+
+    return candidates
 
 
 def detect_highlights(
@@ -249,7 +375,7 @@ def detect_highlights(
 
     if len(windows) == 1:
         # Single window fast-path
-        return _detect_highlights_window(
+        result = _detect_highlights_window(
             client=client,
             segments=transcript.segments,
             audio_peaks=audio_peaks,
@@ -260,6 +386,8 @@ def detect_highlights(
             num_candidates=top_k,
             model_name=model_name,
         )
+        result.candidates = snap_to_word_boundaries(result.candidates, transcript)
+        return result
 
     # Multi-window processing for long streams (> 30 min)
     all_candidates: List[ClipCandidate] = []
@@ -312,9 +440,11 @@ def detect_highlights(
         if len(deduped) >= top_k:
             break
 
+    snapped_candidates = snap_to_word_boundaries(deduped[:top_k], transcript)
+
     return HighlightAnalysisResult(
         summary=f"Multi-window viral analysis across {len(windows)} chunks ({total_duration / 60:.1f} mins).",
-        candidates=deduped[:top_k],
+        candidates=snapped_candidates,
     )
 
 
@@ -337,7 +467,7 @@ Transcript:
 "{clip_transcript}"
 """
     candidate_models = [model_name]
-    for fallback in ("gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash"):
+    for fallback in ("gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"):
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 

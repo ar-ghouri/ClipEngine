@@ -42,6 +42,7 @@ from modules.compositor import (
 from modules.ingest import (
     download_audio_only,
     download_target_clip,
+    extract_youtube_captions,
     get_video_metadata,
     parse_timestamp,
     sanitize_title,
@@ -126,6 +127,16 @@ def clip_video(
         "--captions/--no-captions",
         help="Burn dynamic word-by-word karaoke subtitles",
     ),
+    fast_subs: bool = typer.Option(
+        False,
+        "--fast-subs",
+        help="Fast-path: extract YouTube auto-subtitles instead of running Whisper",
+    ),
+    bgm: bool = typer.Option(
+        False,
+        "--bgm/--no-bgm",
+        help="Mix auto-ducked procedural background music",
+    ),
 ):
     """
     Downloads targeted timestamp range with yt-dlp, renders 9:16 vertical video via NVENC,
@@ -205,23 +216,29 @@ def clip_video(
     # 5. Generate Karaoke Subtitles if enabled
     ass_file: Optional[Path] = None
     if captions:
-        with console.status("[bold yellow]Generating karaoke subtitles..."):
-            try:
+        try:
+            clip_transcript = None
+            if fast_subs:
+                with console.status("[bold green]Checking YouTube auto-subtitles..."):
+                    clip_transcript = extract_youtube_captions(url)
+            if clip_transcript is None:
+                console.print("[bold magenta]Transcribing section via faster-whisper...[/bold magenta]")
                 clip_transcript = transcribe_audio(raw_path)
-                clip_words = [w for seg in clip_transcript.segments for w in seg.words]
-                if clip_words:
-                    ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
-                    generate_ass_subtitles(
-                        words=clip_words,
-                        output_path=ass_file,
-                        clip_start=0.0,
-                        clip_end=duration,
-                        layout=effective_layout.value,
-                        hook_title=hook_title,
-                    )
-                    console.print(f"[green]✓ Generated subtitles:[/green] {ass_file.name}")
-            except Exception as exc:
-                console.print(f"[yellow]Warning: Subtitle generation skipped: {exc}[/yellow]")
+
+            clip_words = [w for seg in clip_transcript.segments for w in seg.words]
+            if clip_words:
+                ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
+                generate_ass_subtitles(
+                    words=clip_words,
+                    output_path=ass_file,
+                    clip_start=0.0,
+                    clip_end=duration,
+                    layout=effective_layout.value,
+                    hook_title=hook_title,
+                )
+                console.print(f"[green]✓ Generated subtitles:[/green] {ass_file.name}")
+        except Exception as exc:
+            console.print(f"[yellow]Warning: Subtitle generation skipped: {exc}[/yellow]")
 
     # 6. Target Output Path (Organized subfolder if title available)
     manual_output_file: Optional[Path] = None
@@ -241,6 +258,7 @@ def clip_video(
                 cam_bbox=effective_bbox,
                 ass_path=ass_file,
                 auto_detect_cam=False,
+                enable_bgm=bgm,
             )
         except Exception as exc:
             update_clip_record(clip_id, status="failed_composite")
@@ -313,6 +331,21 @@ def auto_clip_vod(
         "--captions/--no-captions",
         help="Burn dynamic word-by-word karaoke subtitles",
     ),
+    fast_subs: bool = typer.Option(
+        False,
+        "--fast-subs",
+        help="Fast-path: extract YouTube auto-subtitles instead of running Whisper",
+    ),
+    bgm: bool = typer.Option(
+        True,
+        "--bgm/--no-bgm",
+        help="Auto-ducked background music based on clip vibe",
+    ),
+    force_whisper: bool = typer.Option(
+        False,
+        "--force-whisper",
+        help="Bypass disk cache and force faster-whisper re-transcription",
+    ),
 ):
     """
     End-to-End Autonomous Viral Clipping:
@@ -341,40 +374,68 @@ def auto_clip_vod(
         )
     )
 
-    # Step 1: Download Audio Only
-    console.rule("[bold cyan]Step 1: Smart Audio-Only Ingest[/bold cyan]")
-    with console.status("[bold green]Downloading audio stream (MP3)..."):
-        try:
-            audio_path = download_audio_only(
-                url=url,
-                output_dir=DOWNLOADS_DIR,
-                prefix=f"vod_audio_{meta['id']}",
-            )
-            audio_size_mb = audio_path.stat().st_size / (1024 * 1024)
+    # Step 1 & 2: Subtitles & Audio Analysis
+    transcript = None
+    audio_path = None
+
+    if fast_subs:
+        console.rule("[bold cyan]Fast-Path Subtitles Ingest (--fast-subs)[/bold cyan]")
+        with console.status("[bold green]Checking & extracting YouTube auto-subtitles (.json3)..."):
+            fast_transcript = extract_youtube_captions(url, output_dir=DOWNLOADS_DIR)
+        if fast_transcript:
+            transcript = fast_transcript
             console.print(
-                f"[green]✓ Audio ingest complete:[/green] {audio_path.name} [dim]({audio_size_mb:.2f} MB)[/dim]"
+                f"[bold green]✓ Fast-Path:[/bold green] Extracted {len(transcript.segments)} segments "
+                f"across {transcript.duration:.1f}s in ~3 seconds!"
             )
-        except Exception as exc:
-            console.print(f"[bold red]Audio Ingest Failed:[/bold red] {exc}")
-            raise typer.Exit(code=1)
+        else:
+            console.print(
+                "[yellow]Notice: YouTube auto-subtitles not found. Falling back to audio ingest + Whisper transcription.[/yellow]"
+            )
 
-    # Step 2: GPU Transcription & Audio Peak Analysis
-    console.rule("[bold cyan]Step 2: RTX 4060 Whisper Transcription & Loudness Analysis[/bold cyan]")
-    w_model = whisper_model or WHISPER_MODEL
-    with console.status(f"[bold magenta]Transcribing audio via faster-whisper ({w_model} on CUDA)..."):
+    if transcript is None:
+        # Step 1: Download Audio Only
+        console.rule("[bold cyan]Step 1: Smart Audio-Only Ingest[/bold cyan]")
+        with console.status("[bold green]Downloading audio stream (MP3)..."):
+            try:
+                audio_path = download_audio_only(
+                    url=url,
+                    output_dir=DOWNLOADS_DIR,
+                    prefix=f"vod_audio_{meta['id']}",
+                )
+                audio_size_mb = audio_path.stat().st_size / (1024 * 1024)
+                console.print(
+                    f"[green]✓ Audio ingest complete:[/green] {audio_path.name} [dim]({audio_size_mb:.2f} MB)[/dim]"
+                )
+            except Exception as exc:
+                console.print(f"[bold red]Audio Ingest Failed:[/bold red] {exc}")
+                raise typer.Exit(code=1)
+
+        # Step 2: GPU Transcription
+        console.rule("[bold cyan]Step 2: RTX 4060 Whisper Transcription & Loudness Analysis[/bold cyan]")
+        w_model = whisper_model or WHISPER_MODEL
+        console.print(f"[bold magenta]Transcribing audio via faster-whisper ({w_model} on CUDA)...[/bold magenta]")
         try:
-            transcript = transcribe_audio(audio_path, model_size=w_model)
-            audio_peaks = compute_audio_loudness_peaks(audio_path, top_k=10)
+            transcript = transcribe_audio(audio_path, model_size=w_model, force_recompute=force_whisper)
         except Exception as exc:
-            console.print(f"[bold red]Transcription / Peak Analysis Failed:[/bold red] {exc}")
+            console.print(f"[bold red]Transcription Failed:[/bold red] {exc}")
             raise typer.Exit(code=1)
 
-    console.print(
-        f"[green]✓ Transcribed {len(transcript.segments)} segments across {transcript.duration:.1f}s.[/green]"
-    )
-    if audio_peaks:
-        peak_summary = ", ".join(f"{p.formatted_time} ({p.rms_db:.1f}dB)" for p in audio_peaks[:5])
-        console.print(f"[dim]Top energy spikes: {peak_summary}[/dim]")
+        console.print(
+            f"[green]✓ Transcribed {len(transcript.segments)} segments across {transcript.duration:.1f}s.[/green]"
+        )
+
+    # Compute audio loudness peaks if audio file is available
+    audio_peaks = None
+    if audio_path and audio_path.exists():
+        with console.status("[bold blue]Analyzing audio loudness peaks..."):
+            try:
+                audio_peaks = compute_audio_loudness_peaks(audio_path, top_k=10)
+            except Exception as exc:
+                console.print(f"[yellow]Audio loudness peak analysis skipped: {exc}[/yellow]")
+        if audio_peaks:
+            peak_summary = ", ".join(f"{p.formatted_time} ({p.rms_db:.1f}dB)" for p in audio_peaks[:5])
+            console.print(f"[dim]Top energy spikes: {peak_summary}[/dim]")
 
     # Step 3: Gemini Viral Highlight Detection
     console.rule("[bold cyan]Step 3: Gemini 2.5 Flash Viral Highlight Detection[/bold cyan]")
@@ -398,9 +459,10 @@ def auto_clip_vod(
     console.print(f"[bold green]✓ Gemini identified {len(analysis.candidates)} viral clip moments:[/bold green]")
     for idx, cand in enumerate(analysis.candidates, 1):
         dur = cand.end_time - cand.start_time
+        punch_str = f" [bold red][⚡ PUNCH @ +{cand.climax_offset:.1f}s][/bold red]" if cand.use_dramatic_punch else ""
         console.print(
-            f"  [cyan]{idx}.[/cyan] [bold]'{cand.hook_title}'[/bold] "
-            f"({cand.start_time:.1f}s -> {cand.end_time:.1f}s, {dur:.1f}s, Score: [bold yellow]{cand.virality_score}/10.0[/bold yellow])\n"
+            f"  [cyan]{idx}.[/cyan] [bold]'{cand.hook_title}'[/bold]{punch_str} "
+            f"({cand.start_time:.1f}s -> {cand.end_time:.1f}s, {dur:.1f}s, Score: [bold yellow]{cand.virality_score}/10.0[/bold yellow], Vibe: [magenta]{cand.vibe}[/magenta])\n"
             f"     [dim]Reason: {cand.reasoning}[/dim]"
         )
 
@@ -420,7 +482,7 @@ def auto_clip_vod(
         dur = cand.end_time - cand.start_time
         console.print(
             f"\n[bold]Rendering Clip {idx}/{len(analysis.candidates)}:[/bold] [yellow]'{cand.hook_title}'[/yellow] "
-            f"[dim]({cand.start_time:.1f}s -> {cand.end_time:.1f}s)[/dim]"
+            f"[dim]({cand.start_time:.1f}s -> {cand.end_time:.1f}s, Vibe: {cand.vibe})[/dim]"
         )
 
         # 4a. Register record in SQLite
@@ -431,6 +493,9 @@ def auto_clip_vod(
             hook_title=cand.hook_title,
             virality_score=cand.virality_score,
             status="ingesting",
+            vibe=cand.vibe,
+            climax_offset=cand.climax_offset,
+            use_dramatic_punch=cand.use_dramatic_punch,
         )
 
         # 4b. Targeted section download ONLY
@@ -490,7 +555,7 @@ def auto_clip_vod(
         hook_clean = sanitize_title(cand.hook_title, max_chars=60)
         target_clip_output = vod_output_dir / f"{idx:02d}_{hook_clean}.mp4"
 
-        # 4d. Single-pass GPU NVENC Compositing
+        # 4d. Single-pass GPU NVENC Compositing with Anti-Haze, Director FX & Ducked BGM
         try:
             output_video = compose_clip(
                 input_video=raw_clip,
@@ -499,6 +564,10 @@ def auto_clip_vod(
                 cam_bbox=clip_bbox,
                 ass_path=ass_path,
                 auto_detect_cam=False,
+                vibe=cand.vibe,
+                climax_offset=cand.climax_offset,
+                use_dramatic_punch=cand.use_dramatic_punch,
+                enable_bgm=bgm,
             )
             console.print(f"  [green]✓ Rendered:[/green] {output_video.name}")
         except Exception as exc:
@@ -507,6 +576,12 @@ def auto_clip_vod(
             continue
 
         update_clip_record(clip_id, status="completed", output_path=str(output_video))
+        director_fx_str = (
+            f"Punch + Flash @ {cand.climax_offset:.1f}s"
+            if cand.use_dramatic_punch
+            else "Standard"
+        )
+        bgm_str = f"{cand.vibe} (-18dB)" if bgm else "Disabled"
         completed_clips.append(
             {
                 "id": clip_id,
@@ -515,6 +590,9 @@ def auto_clip_vod(
                 "duration": dur,
                 "layout": clip_layout.value,
                 "captions": "Burned" if ass_path else "None",
+                "vibe": cand.vibe,
+                "director_fx": director_fx_str,
+                "bgm": bgm_str,
                 "path": output_video,
             }
         )
@@ -526,12 +604,15 @@ def auto_clip_vod(
         show_header=True,
         header_style="bold green",
     )
-    table.add_column("ID", style="bold", width=5)
-    table.add_column("Hook Title", width=35)
-    table.add_column("Score", justify="center", width=8)
-    table.add_column("Duration", justify="center", width=10)
-    table.add_column("Layout", justify="center", width=14)
-    table.add_column("Captions", justify="center", width=10)
+    table.add_column("ID", style="bold", width=4)
+    table.add_column("Hook Title", width=30)
+    table.add_column("Score", justify="center", width=7)
+    table.add_column("Duration", justify="center", width=9)
+    table.add_column("Layout", justify="center", width=13)
+    table.add_column("Vibe", justify="center", width=15)
+    table.add_column("Director FX", justify="center", width=22)
+    table.add_column("BGM", justify="center", width=18)
+    table.add_column("Captions", justify="center", width=9)
     table.add_column("Output File Path")
 
     for c in completed_clips:
@@ -541,6 +622,9 @@ def auto_clip_vod(
             f"{c['score']:.1f}/10",
             f"{c['duration']:.1f}s",
             c["layout"],
+            f"[magenta]{c['vibe']}[/magenta]",
+            f"[bold yellow]{c['director_fx']}[/bold yellow]" if "Punch" in c['director_fx'] else "[dim]Standard[/dim]",
+            f"[cyan]{c['bgm']}[/cyan]" if c['bgm'] != "Disabled" else "[dim]Disabled[/dim]",
             f"[green]{c['captions']}[/green]",
             str(c["path"]),
         )

@@ -32,12 +32,23 @@ def init_db(db_path: Path = DB_PATH) -> None:
         virality_score REAL,
         output_path TEXT,
         status TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        vibe TEXT,
+        climax_offset REAL,
+        use_dramatic_punch INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_clips_status ON clips(status);
     """
     with get_db_connection(db_path) as conn:
         conn.executescript(schema)
+        # Migrate existing table if columns are missing
+        existing_cols = [c["name"] for c in conn.execute("PRAGMA table_info(clips)").fetchall()]
+        if "vibe" not in existing_cols:
+            conn.execute("ALTER TABLE clips ADD COLUMN vibe TEXT")
+        if "climax_offset" not in existing_cols:
+            conn.execute("ALTER TABLE clips ADD COLUMN climax_offset REAL")
+        if "use_dramatic_punch" not in existing_cols:
+            conn.execute("ALTER TABLE clips ADD COLUMN use_dramatic_punch INTEGER")
         conn.commit()
 
 
@@ -49,6 +60,9 @@ def create_clip_record(
     virality_score: Optional[float] = None,
     output_path: Optional[str] = None,
     status: str = "pending",
+    vibe: Optional[str] = None,
+    climax_offset: Optional[float] = None,
+    use_dramatic_punch: Optional[bool] = None,
     db_path: Path = DB_PATH,
 ) -> int:
     """
@@ -57,8 +71,8 @@ def create_clip_record(
     """
     now_iso = datetime.now().isoformat()
     query = """
-    INSERT INTO clips (vod_url, clip_start, clip_end, hook_title, virality_score, output_path, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO clips (vod_url, clip_start, clip_end, hook_title, virality_score, output_path, status, created_at, vibe, climax_offset, use_dramatic_punch)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     with get_db_connection(db_path) as conn:
         cursor = conn.execute(
@@ -72,6 +86,9 @@ def create_clip_record(
                 output_path,
                 status,
                 now_iso,
+                vibe,
+                climax_offset,
+                1 if use_dramatic_punch else 0 if use_dramatic_punch is not None else None,
             ),
         )
         conn.commit()
