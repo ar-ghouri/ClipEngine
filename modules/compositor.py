@@ -491,14 +491,12 @@ def detect_facecam(
             if not matched:
                 clusters.append([face])
 
-    # If no faces were detected in any sampled frame, default speaker_x to 0.5 (dead center)
-    if not clusters:
-        return None, 0.5
-
-    # Determine primary speaker horizontal center X from the largest face cluster
-    primary_cluster = max(clusters, key=lambda c: sum(item[2] * item[3] for item in c))
-    speaker_x_norm = float(sum(item[4] for item in primary_cluster) / len(primary_cluster))
-    speaker_x_norm = max(0.0, min(1.0, round(speaker_x_norm, 4)))
+    # Determine primary speaker horizontal center X if faces were detected
+    speaker_x_norm = 0.5
+    if clusters:
+        primary_cluster = max(clusters, key=lambda c: sum(item[2] * item[3] for item in c))
+        speaker_x_norm = float(sum(item[4] for item in primary_cluster) / len(primary_cluster))
+        speaker_x_norm = max(0.0, min(1.0, round(speaker_x_norm, 4)))
 
     # Evaluate clusters for corner gaming webcam overlay:
     # Must appear consistently across >= 2 frames (or 1 if only 1 frame could be read)
