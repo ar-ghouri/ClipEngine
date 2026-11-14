@@ -228,18 +228,15 @@ def clip_video(
         effective_bbox = CORNER_MAP[norm_corner]
         console.print(f"[green]✓ Manual webcam corner override ({norm_corner}):[/green] {effective_bbox} -> gaming_split")
     elif layout == LayoutMode.AUTO:
-        from modules.brain import classify_video_layout_vision
         with console.status("[bold blue]Universal AI Layout Router analyzing video framing..."):
-            try:
-                classified_l, det_cam, det_spk = classify_video_layout_vision(raw_path, vod_key=vod_id)
-                effective_layout = LayoutMode(classified_l)
-                if det_cam:
-                    effective_bbox = det_cam
-                effective_speaker_x = det_spk
-                console.print(f"[green]✓ Universal AI Layout Router:[/green] selected '{effective_layout.value}' (speaker_x={effective_speaker_x:.2f})")
-            except Exception as exc:
-                console.print(f"[yellow]Layout classification failed ({exc}); falling back to cinema_blur[/yellow]")
-                effective_layout = LayoutMode.CINEMA_BLUR
+            detected_bbox, detected_speaker_x = detect_facecam(raw_path, vod_key=vod_id)
+            if detected_bbox is not None:
+                effective_layout = LayoutMode.GAMING_SPLIT
+                effective_bbox = detected_bbox
+                console.print(f"[green]✓ Universal AI Layout Router:[/green] corner gaming webcam detected at {effective_bbox} -> gaming_split")
+            else:
+                effective_layout = LayoutMode.AUTO
+                console.print("[green]✓ Universal AI Layout Router: scene-aware dynamic framing active[/green]")
     elif layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
         with console.status("[bold blue]Analyzing video framing and webcam/speaker position..."):
             detected_bbox, detected_speaker_x = detect_facecam(raw_path, vod_key=vod_id)
@@ -592,17 +589,14 @@ def auto_clip_vod(
             clip_bbox = CORNER_MAP[norm_corner]
             console.print(f"  [green]✓ Webcam Corner Override ({norm_corner}):[/green] {clip_bbox} -> gaming_split")
         elif layout == LayoutMode.AUTO:
-            from modules.brain import classify_video_layout_vision
-            try:
-                classified_l, det_cam, det_spk = classify_video_layout_vision(raw_clip, vod_key=vod_id)
-                clip_layout = LayoutMode(classified_l)
-                if det_cam:
-                    clip_bbox = det_cam
-                clip_speaker_x = det_spk
-                console.print(f"  [green]✓ Universal AI Layout Router:[/green] selected '{clip_layout.value}' (speaker_x={clip_speaker_x:.2f})")
-            except Exception as exc:
-                console.print(f"  [yellow]Layout classification failed ({exc}); falling back to cinema_blur[/yellow]")
-                clip_layout = LayoutMode.CINEMA_BLUR
+            detected_bbox, detected_speaker_x = detect_facecam(raw_clip, vod_key=vod_id)
+            if detected_bbox is not None:
+                clip_layout = LayoutMode.GAMING_SPLIT
+                clip_bbox = detected_bbox
+                console.print(f"  [green]✓ Universal AI Layout Router:[/green] corner gaming webcam detected at {clip_bbox} -> gaming_split")
+            else:
+                clip_layout = LayoutMode.AUTO
+                console.print("  [green]✓ Universal AI Layout Router:[/green] scene-aware dynamic framing active")
         elif layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
             detected_bbox, detected_speaker_x = detect_facecam(raw_clip, vod_key=vod_id)
             if detected_bbox is not None:
