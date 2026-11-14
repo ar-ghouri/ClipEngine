@@ -275,8 +275,14 @@ def generate_ass_subtitles(
         style = CaptionStyle()
 
     # Layout-aware alignment and vertical anchor
+    is_cinema_blur = "cinema_blur" in layout.lower()
     is_gaming_split = "gaming_split" in layout.lower()
-    if is_gaming_split:
+
+    if is_cinema_blur:
+        alignment = 2       # Bottom-Center
+        margin_v = 420      # Anchored in bottom blurred space below 16:9 content
+        pos_tag = ""
+    elif is_gaming_split:
         alignment = 5       # Middle-Center
         margin_v = 640      # Exactly on the 640px split seam
         pos_tag = "{\\pos(540,640)}"
@@ -320,9 +326,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             wrapped_text = r"\N".join(wrapped_lines) if wrapped_lines else clean_hook
 
+        # For cinema_blur: \pos(540,480) (directly above 16:9 box in upper blurred space)
         # For gaming_split: \pos(540,735) (top of gameplay zone)
         # For center_crop: \pos(540,260) (upper third safe zone)
-        banner_pos = r"\pos(540,735)" if is_gaming_split else r"\pos(540,260)"
+        if is_cinema_blur:
+            banner_pos = r"\pos(540,480)"
+        elif is_gaming_split:
+            banner_pos = r"\pos(540,735)"
+        else:
+            banner_pos = r"\pos(540,260)"
         events.append(
             f"Dialogue: 1,0:00:00.00,0:00:03.50,HookBanner,,0,0,0,,{{{banner_pos}\\fad(0,250)}}{wrapped_text}"
         )

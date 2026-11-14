@@ -222,10 +222,13 @@ def transcribe_audio(
     word_timestamps: bool = True,
     vad_filter: bool = WHISPER_VAD_FILTER,
     force_recompute: bool = False,
+    video_id: Optional[str] = None,
+    cache_path: Optional[Path] = None,
 ) -> TranscriptionResult:
     """
     Transcribes audio into timestamped segments and aligned words using faster-whisper.
     Automatically checks and caches results as .json to avoid duplicate processing.
+    Isolates cache strictly by video_id: <video_id>_whisper.transcript.json.
 
     Args:
         audio_path: Path to .mp3, .wav, or extracted audio.
@@ -236,6 +239,8 @@ def transcribe_audio(
         word_timestamps: Extract word-level timings for karaoke subtitles.
         vad_filter: Enable Voice Activity Detection filter.
         force_recompute: Bypass disk cache if True.
+        video_id: Optional YouTube video ID for strict cache isolation.
+        cache_path: Optional explicit path for the transcript cache JSON.
 
     Returns:
         TranscriptionResult object.
@@ -244,8 +249,14 @@ def transcribe_audio(
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file does not exist: {audio_path}")
 
+    # Determine cache path strictly by video_id if provided
+    if cache_path is None:
+        if video_id:
+            cache_path = audio_path.parent / f"{video_id}_whisper.transcript.json"
+        else:
+            cache_path = audio_path.with_suffix(".transcript.json")
+
     # Check disk cache
-    cache_path = audio_path.with_suffix(".transcript.json")
     if not force_recompute and cache_path.exists():
         try:
             cached_data = json.loads(cache_path.read_text(encoding="utf-8"))

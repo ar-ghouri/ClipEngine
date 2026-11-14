@@ -17,3 +17,8 @@ google-genai>=0.1.0
 
 # Stage 4: Computer Vision & Facecam Detection
 opencv-python-headless>=4.9.0,<5
+
+# Web Studio Backend
+fastapi>=0.110.0
+uvicorn>=0.28.0
+

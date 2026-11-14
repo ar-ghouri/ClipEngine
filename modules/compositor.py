@@ -133,8 +133,10 @@ def resolve_bgm_track(vibe: Optional[str] = None, bgm_dir: Path = BGM_DIR) -> Op
 
 
 class LayoutMode(str, Enum):
-    CENTER_CROP = "center_crop"
+    AUTO = "auto"
+    CINEMA_BLUR = "cinema_blur"
     GAMING_SPLIT = "gaming_split"
+    CENTER_CROP = "center_crop"
 
 
 def probe_video(video_path: Path) -> Dict[str, Any]:
@@ -384,6 +386,34 @@ def build_filtergraph(
             fg += f",ass='{escape_ffmpeg_path(ass_path)}'"
         return fg + "[v]"
 
+    elif layout == LayoutMode.CINEMA_BLUR:
+        # Background: fill 1080x1920 canvas, crop, blur, and dim
+        # Foreground: scale cleanly to 1080 width with Lanczos + CAS 0.6 anti-haze sharpening
+        # Overlay: centered vertically
+        if use_dramatic_punch and climax_offset is not None:
+            fg = (
+                f"[0:v]scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=increase,"
+                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},boxblur=25:5,eq=brightness=-0.22:contrast=0.9[bg];"
+                f"[0:v]scale={CANVAS_WIDTH}:-2:flags=lanczos,{ANTI_HAZE_FILTER},setsar=1[fg_base];"
+                f"[fg_base]split[fg_main][fg_zsrc];"
+                f"[fg_zsrc]crop=iw/1.12:ih/1.12:(iw-iw/1.12)/2:(ih-ih/1.12)/2,"
+                f"scale={CANVAS_WIDTH}:-2:flags=lanczos[fg_zoomed];"
+                f"[fg_main][fg_zoomed]overlay=0:0:enable='between(t,{t_climax:.3f},{t_zoom_end:.3f})',"
+                f"eq=brightness=0.18:enable='between(t,{t_climax:.3f},{t_flash_end:.3f})'[fg];"
+                f"[bg][fg]overlay=0:(H-h)/2,setsar=1"
+            )
+        else:
+            fg = (
+                f"[0:v]scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=increase,"
+                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},boxblur=25:5,eq=brightness=-0.22:contrast=0.9[bg];"
+                f"[0:v]scale={CANVAS_WIDTH}:-2:flags=lanczos,{ANTI_HAZE_FILTER},setsar=1[fg];"
+                f"[bg][fg]overlay=0:(H-h)/2,setsar=1"
+            )
+
+        if ass_path:
+            fg += f",ass='{escape_ffmpeg_path(ass_path)}'"
+        return fg + "[v]"
+
     else:
         raise ValueError(f"Unsupported layout mode: {layout}")
 
@@ -568,7 +598,7 @@ def detect_facecam(
 def compose_clip(
     input_video: Path,
     output_path: Optional[Path] = None,
-    layout: Union[LayoutMode, str] = LayoutMode.GAMING_SPLIT,
+    layout: Union[LayoutMode, str] = LayoutMode.AUTO,
     cam_bbox: Tuple[float, float, float, float] = DEFAULT_WEBCAM_BBOX,
     speaker_x: float = 0.5,
     ass_path: Optional[Path] = None,
@@ -595,7 +625,7 @@ def compose_clip(
     Args:
         input_video: Path to the raw downloaded video section.
         output_path: Desired output path in outputs/ (auto-generated if None).
-        layout: "center_crop" or "gaming_split".
+        layout: "auto", "cinema_blur", "gaming_split", or "center_crop".
         cam_bbox: Normalized (x, y, w, h) for webcam region in gaming_split.
         speaker_x: Normalized horizontal center X (0.0 - 1.0) for center_crop speaker framing.
         ass_path: Optional path to .ass subtitle script to burn in single pass.
@@ -623,6 +653,22 @@ def compose_clip(
 
     if isinstance(layout, str):
         layout = LayoutMode(layout.lower())
+
+    # Universal AI Layout Router if layout is AUTO
+    if layout == LayoutMode.AUTO:
+        from modules.brain import classify_video_layout_vision
+        try:
+            detected_layout_str, detected_cam_bbox, detected_speaker_x = classify_video_layout_vision(
+                input_path, vod_key=vod_key
+            )
+            layout = LayoutMode(detected_layout_str)
+            if detected_cam_bbox:
+                cam_bbox = detected_cam_bbox
+            speaker_x = detected_speaker_x
+            logger.info("Universal AI classified layout as '%s' (speaker_x=%.2f)", layout.value, speaker_x)
+        except Exception as exc:
+            logger.warning("Layout auto-classification failed (%s); falling back to cinema_blur", exc)
+            layout = LayoutMode.CINEMA_BLUR
 
     # Smart Auto-Webcam Detection & Fallback if gaming_split is requested with default cam_bbox
     if layout == LayoutMode.GAMING_SPLIT and auto_detect_cam and cam_bbox == DEFAULT_WEBCAM_BBOX:

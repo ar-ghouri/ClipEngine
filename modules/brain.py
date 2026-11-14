@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from config import GEMINI_API_KEY, GEMINI_MODEL, SPLIT_TOP_AR
-from database import get_cached_webcam, set_cached_webcam
+from database import get_cached_layout, get_cached_webcam, set_cached_layout, set_cached_webcam
 from modules.transcriber import AudioPeak, TranscriptionResult, WordTimestamp
 
 logger = logging.getLogger("clipengine.brain")
@@ -41,6 +41,26 @@ class WebcamDetectionResult(BaseModel):
     cam_h: float = Field(
         default=0.30,
         description="Normalized height (0.0 to 1.0) of the webcam box",
+    )
+
+
+class LayoutClassificationResult(BaseModel):
+    """Structured response from Gemini Vision for universal video layout classification."""
+
+    layout: Literal["cinema_blur", "gaming_split", "center_crop"] = Field(
+        ...,
+        description=(
+            "Best vertical 9:16 layout for this video: 'cinema_blur' for wide content/slides/finance/educational/movie clips, "
+            "'gaming_split' for gaming with corner streamer facecam, 'center_crop' for full-screen talking heads/interviews"
+        ),
+    )
+    speaker_x: float = Field(
+        default=0.5,
+        description="Normalized horizontal center (0.0 to 1.0) of main speaker if center_crop is chosen",
+    )
+    reasoning: str = Field(
+        default="",
+        description="Short reason why this layout was selected",
     )
 
 
@@ -256,6 +276,144 @@ def detect_webcam_gemini_vision(
     set_cached_webcam(vod_key, True, final_bbox)
     logger.info("Gemini Vision detected corner webcam box at %s for VOD '%s'", final_bbox, vod_key)
     return True, final_bbox
+
+
+_MEMORY_LAYOUT_CACHE: Dict[str, Tuple[str, Optional[Tuple[float, float, float, float]], float]] = {}
+
+
+def classify_video_layout_vision(
+    video_path: Path,
+    vod_key: Optional[str] = None,
+    api_key: Optional[str] = None,
+    model_name: str = GEMINI_MODEL,
+) -> Tuple[str, Optional[Tuple[float, float, float, float]], float]:
+    """
+    Analyzes video frame with Gemini Vision to determine the optimal layout mode:
+    'cinema_blur', 'gaming_split', or 'center_crop'.
+    Caches result in-memory and in SQLite database vod_webcam_cache.
+
+    Returns:
+        (layout_name, cam_bbox, speaker_x)
+    """
+    import cv2
+    from google.genai import types
+
+    v_path = Path(video_path).resolve()
+    if not vod_key:
+        stem_parts = v_path.stem.split("_")
+        if len(stem_parts) >= 3 and len(stem_parts[2]) == 11:
+            vod_key = stem_parts[2]
+        elif len(v_path.parent.name) == 11:
+            vod_key = v_path.parent.name
+        else:
+            vod_key = v_path.stem
+
+    # 1. Check in-memory cache
+    if vod_key in _MEMORY_LAYOUT_CACHE:
+        logger.info("Using in-memory cached layout for VOD '%s': %s", vod_key, _MEMORY_LAYOUT_CACHE[vod_key])
+        return _MEMORY_LAYOUT_CACHE[vod_key]
+
+    # 2. Check SQLite cache
+    cached = get_cached_layout(vod_key)
+    if cached is not None:
+        logger.info("Using SQLite cached layout for VOD '%s': %s", vod_key, cached)
+        _MEMORY_LAYOUT_CACHE[vod_key] = cached
+        return cached
+
+    # 3. Extract 1 frame from middle of video
+    if not v_path.exists():
+        logger.warning("Video file not found for layout vision classification: %s", v_path)
+        return "cinema_blur", None, 0.5
+
+    cap = cv2.VideoCapture(str(v_path))
+    if not cap.isOpened():
+        logger.warning("cv2.VideoCapture could not open %s", v_path)
+        return "cinema_blur", None, 0.5
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames <= 0:
+        cap.release()
+        return "cinema_blur", None, 0.5
+
+    mid_idx = total_frames // 2
+    cap.set(cv2.CAP_PROP_POS_FRAMES, mid_idx)
+    ret, frame = cap.read()
+    cap.release()
+
+    if not ret or frame is None:
+        logger.warning("Failed to read middle frame for Gemini Vision layout classification")
+        return "cinema_blur", None, 0.5
+
+    ret, buf = cv2.imencode(".jpg", frame)
+    if not ret:
+        logger.warning("Failed to encode frame to JPEG for layout vision")
+        return "cinema_blur", None, 0.5
+    image_bytes = buf.tobytes()
+
+    client = init_gemini_client(api_key)
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+
+    prompt = (
+        "Analyze this video frame and choose the best vertical 9:16 layout:\n"
+        "1) \"gaming_split\": livestream with a corner webcam box and gameplay.\n"
+        "2) \"center_crop\": full-screen single or double person talking head/interview where cropping to 9:16 preserves the speaker.\n"
+        "3) \"cinema_blur\": slides, screen recordings, text on screen, finance charts, educational presentations, sports/anime highlights, or multi-person wide shots where cropping loses essential visual context.\n"
+        "Return JSON: {\"layout\": \"cinema_blur\" | \"gaming_split\" | \"center_crop\", \"speaker_x\": float, \"reasoning\": str}"
+    )
+
+    candidate_models = [model_name]
+    for fallback in ("gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"):
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
+
+    layout_result: Optional[LayoutClassificationResult] = None
+    for m in candidate_models:
+        try:
+            logger.info("Querying Gemini Vision for universal layout classification using %s...", m)
+            response = client.models.generate_content(
+                model=m,
+                contents=[image_part, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=LayoutClassificationResult,
+                    temperature=0.1,
+                ),
+            )
+            if getattr(response, "parsed", None) is not None and isinstance(response.parsed, LayoutClassificationResult):
+                layout_result = response.parsed
+                break
+            elif response.text:
+                layout_result = LayoutClassificationResult.model_validate_json(response.text)
+                break
+        except Exception as exc:
+            logger.warning("Gemini Vision model %s failed: %s. Trying next fallback...", m, exc)
+
+    if layout_result is None:
+        logger.warning("Layout classification failed on all models; defaulting to 'cinema_blur'")
+        chosen_layout = "cinema_blur"
+        speaker_x = 0.5
+        cam_bbox = None
+        has_cam = False
+    else:
+        chosen_layout = layout_result.layout
+        speaker_x = max(0.0, min(1.0, float(layout_result.speaker_x)))
+        cam_bbox = None
+        has_cam = False
+
+        if chosen_layout == "gaming_split":
+            # Detect corner webcam box
+            has_cam, cam_bbox = detect_webcam_gemini_vision(video_path, vod_key=vod_key, api_key=api_key, model_name=model_name)
+            if not has_cam or not cam_bbox:
+                # If vision doesn't detect a corner webcam, fallback to cinema_blur so gameplay/content isn't ruined
+                logger.info("No corner webcam detected for gaming_split; falling back to 'cinema_blur'")
+                chosen_layout = "cinema_blur"
+
+    # Save to SQLite and memory cache
+    set_cached_layout(vod_key, chosen_layout, has_cam, cam_bbox, speaker_x)
+    result_tuple = (chosen_layout, cam_bbox, speaker_x)
+    _MEMORY_LAYOUT_CACHE[vod_key] = result_tuple
+    logger.info("Universal Layout Classifier selected '%s' (speaker_x=%.2f) for VOD '%s'", chosen_layout, speaker_x, vod_key)
+    return result_tuple
 
 
 def _generate_time_windows(

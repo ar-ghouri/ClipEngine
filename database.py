@@ -59,6 +59,13 @@ def init_db(db_path: Path = DB_PATH) -> None:
             conn.execute("ALTER TABLE clips ADD COLUMN climax_offset REAL")
         if "use_dramatic_punch" not in existing_cols:
             conn.execute("ALTER TABLE clips ADD COLUMN use_dramatic_punch INTEGER")
+
+        # Migrate vod_webcam_cache table if columns are missing
+        existing_webcam_cols = [c["name"] for c in conn.execute("PRAGMA table_info(vod_webcam_cache)").fetchall()]
+        if "layout" not in existing_webcam_cols:
+            conn.execute("ALTER TABLE vod_webcam_cache ADD COLUMN layout TEXT")
+        if "speaker_x" not in existing_webcam_cols:
+            conn.execute("ALTER TABLE vod_webcam_cache ADD COLUMN speaker_x REAL")
         conn.commit()
 
 
@@ -201,6 +208,60 @@ def set_cached_webcam(
     cam_x, cam_y, cam_w, cam_h = bbox if bbox else (None, None, None, None)
     with get_db_connection(db_path) as conn:
         conn.execute(query, (vod_key, 1 if has_cam else 0, cam_x, cam_y, cam_w, cam_h, now_iso))
+        conn.commit()
+
+
+def get_cached_layout(
+    vod_key: str, db_path: Path = DB_PATH
+) -> Optional[Tuple[str, Optional[Tuple[float, float, float, float]], float]]:
+    """Retrieves cached layout classification (layout, cam_bbox, speaker_x) from SQLite."""
+    init_db(db_path)
+    query = "SELECT layout, has_corner_webcam, cam_x, cam_y, cam_w, cam_h, speaker_x FROM vod_webcam_cache WHERE vod_key = ?"
+    with get_db_connection(db_path) as conn:
+        row = conn.execute(query, (vod_key,)).fetchone()
+        if not row or not row["layout"]:
+            return None
+        layout = str(row["layout"])
+        has_cam = bool(row["has_corner_webcam"])
+        bbox = None
+        if has_cam and row["cam_w"] is not None:
+            bbox = (
+                float(row["cam_x"]),
+                float(row["cam_y"]),
+                float(row["cam_w"]),
+                float(row["cam_h"]),
+            )
+        spk_x = float(row["speaker_x"]) if row["speaker_x"] is not None else 0.5
+        return layout, bbox, spk_x
+
+
+def set_cached_layout(
+    vod_key: str,
+    layout: str,
+    has_cam: bool,
+    bbox: Optional[Tuple[float, float, float, float]],
+    speaker_x: float = 0.5,
+    db_path: Path = DB_PATH,
+) -> None:
+    """Saves or updates cached layout classification in SQLite."""
+    init_db(db_path)
+    now_iso = datetime.now().isoformat()
+    query = """
+    INSERT INTO vod_webcam_cache (vod_key, has_corner_webcam, cam_x, cam_y, cam_w, cam_h, layout, speaker_x, detected_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(vod_key) DO UPDATE SET
+        has_corner_webcam = excluded.has_corner_webcam,
+        cam_x = excluded.cam_x,
+        cam_y = excluded.cam_y,
+        cam_w = excluded.cam_w,
+        cam_h = excluded.cam_h,
+        layout = excluded.layout,
+        speaker_x = excluded.speaker_x,
+        detected_at = excluded.detected_at
+    """
+    cam_x, cam_y, cam_w, cam_h = bbox if bbox else (None, None, None, None)
+    with get_db_connection(db_path) as conn:
+        conn.execute(query, (vod_key, 1 if has_cam else 0, cam_x, cam_y, cam_w, cam_h, layout, speaker_x, now_iso))
         conn.commit()
 
 

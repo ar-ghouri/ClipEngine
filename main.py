@@ -42,6 +42,7 @@ from modules.compositor import (
 from modules.ingest import (
     download_audio_only,
     download_target_clip,
+    extract_video_id,
     extract_youtube_captions,
     get_video_metadata,
     parse_timestamp,
@@ -107,10 +108,10 @@ def clip_video(
         help="Clip end timestamp (e.g. '00:02:00', '120', or '2:00')",
     ),
     layout: LayoutMode = typer.Option(
-        LayoutMode.GAMING_SPLIT,
+        LayoutMode.AUTO,
         "--layout",
         "-l",
-        help="Output layout: 'gaming_split' (webcam + gameplay) or 'center_crop' (9:16 crop)",
+        help="Output layout: 'auto' (universal AI router), 'cinema_blur' (slides/wide), 'gaming_split' (webcam + gameplay), or 'center_crop' (9:16 crop)",
     ),
     cam_bbox: str = typer.Option(
         "0.0,0.0,0.25,0.25",
@@ -190,13 +191,17 @@ def clip_video(
     console.print(f"[dim]Initialized SQLite record [bold]#{clip_id}[/bold][/dim]")
 
     # 3. Targeted Smart Ingest
+    vod_id = extract_video_id(url)
+    vod_downloads_dir = DOWNLOADS_DIR / vod_id
+    vod_downloads_dir.mkdir(parents=True, exist_ok=True)
+
     with console.status(f"[bold green]Downloading section ({duration:.1f}s) via yt-dlp..."):
         try:
             raw_path = download_target_clip(
                 url=url,
                 start_time=start_sec,
                 end_time=end_sec,
-                output_dir=DOWNLOADS_DIR,
+                output_dir=vod_downloads_dir,
                 prefix=f"clip_{clip_id}",
             )
         except Exception as exc:
@@ -222,9 +227,22 @@ def clip_video(
         effective_layout = LayoutMode.GAMING_SPLIT
         effective_bbox = CORNER_MAP[norm_corner]
         console.print(f"[green]✓ Manual webcam corner override ({norm_corner}):[/green] {effective_bbox} -> gaming_split")
+    elif layout == LayoutMode.AUTO:
+        from modules.brain import classify_video_layout_vision
+        with console.status("[bold blue]Universal AI Layout Router analyzing video framing..."):
+            try:
+                classified_l, det_cam, det_spk = classify_video_layout_vision(raw_path, vod_key=vod_id)
+                effective_layout = LayoutMode(classified_l)
+                if det_cam:
+                    effective_bbox = det_cam
+                effective_speaker_x = det_spk
+                console.print(f"[green]✓ Universal AI Layout Router:[/green] selected '{effective_layout.value}' (speaker_x={effective_speaker_x:.2f})")
+            except Exception as exc:
+                console.print(f"[yellow]Layout classification failed ({exc}); falling back to cinema_blur[/yellow]")
+                effective_layout = LayoutMode.CINEMA_BLUR
     elif layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
         with console.status("[bold blue]Analyzing video framing and webcam/speaker position..."):
-            detected_bbox, detected_speaker_x = detect_facecam(raw_path, vod_key=url)
+            detected_bbox, detected_speaker_x = detect_facecam(raw_path, vod_key=vod_id)
             if detected_bbox is not None:
                 effective_bbox = detected_bbox
                 console.print(f"[green]✓ Corner webcam face detected at normalized coordinates:[/green] {effective_bbox}")
@@ -245,7 +263,7 @@ def clip_video(
 
             clip_words = [w for seg in clip_transcript.segments for w in seg.words]
             if clip_words:
-                ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
+                ass_file = vod_downloads_dir / f"clip_{clip_id}.ass"
                 generate_ass_subtitles(
                     words=clip_words,
                     output_path=ass_file,
@@ -319,10 +337,10 @@ def auto_clip_vod(
         help="Maximum viral clips to generate (default 3)",
     ),
     layout: LayoutMode = typer.Option(
-        LayoutMode.GAMING_SPLIT,
+        LayoutMode.AUTO,
         "--layout",
         "-l",
-        help="Output layout: 'gaming_split' (webcam + gameplay) or 'center_crop' (9:16 crop)",
+        help="Output layout: 'auto' (universal AI router), 'cinema_blur' (slides/wide), 'gaming_split' (webcam + gameplay), or 'center_crop' (9:16 crop)",
     ),
     cam_bbox: str = typer.Option(
         "0.0,0.0,0.25,0.25",
@@ -407,11 +425,14 @@ def auto_clip_vod(
     # Step 1 & 2: Subtitles & Audio Analysis
     transcript = None
     audio_path = None
+    vod_id = meta.get("id") or extract_video_id(url)
+    vod_downloads_dir = DOWNLOADS_DIR / vod_id
+    vod_downloads_dir.mkdir(parents=True, exist_ok=True)
 
     if fast_subs:
         console.rule("[bold cyan]Fast-Path Subtitles Ingest (--fast-subs)[/bold cyan]")
         with console.status("[bold green]Checking & extracting YouTube auto-subtitles (.json3)..."):
-            fast_transcript = extract_youtube_captions(url, output_dir=DOWNLOADS_DIR)
+            fast_transcript = extract_youtube_captions(url, output_dir=vod_downloads_dir, video_id=vod_id)
         if fast_transcript:
             transcript = fast_transcript
             console.print(
@@ -430,8 +451,8 @@ def auto_clip_vod(
             try:
                 audio_path = download_audio_only(
                     url=url,
-                    output_dir=DOWNLOADS_DIR,
-                    prefix=f"vod_audio_{meta['id']}",
+                    output_dir=vod_downloads_dir,
+                    prefix=f"{vod_id}_audio",
                 )
                 audio_size_mb = audio_path.stat().st_size / (1024 * 1024)
                 console.print(
@@ -446,7 +467,14 @@ def auto_clip_vod(
         w_model = whisper_model or WHISPER_MODEL
         console.print(f"[bold magenta]Transcribing audio via faster-whisper ({w_model} on CUDA)...[/bold magenta]")
         try:
-            transcript = transcribe_audio(audio_path, model_size=w_model, force_recompute=force_whisper)
+            whisper_cache = vod_downloads_dir / f"{vod_id}_whisper.transcript.json"
+            transcript = transcribe_audio(
+                audio_path,
+                model_size=w_model,
+                force_recompute=force_whisper,
+                video_id=vod_id,
+                cache_path=whisper_cache,
+            )
         except Exception as exc:
             console.print(f"[bold red]Transcription Failed:[/bold red] {exc}")
             raise typer.Exit(code=1)
@@ -540,7 +568,7 @@ def auto_clip_vod(
                 url=url,
                 start_time=cand.start_time,
                 end_time=cand.end_time,
-                output_dir=DOWNLOADS_DIR,
+                output_dir=vod_downloads_dir,
                 prefix=f"clip_{clip_id}",
             )
             console.print(f"  [green]✓ Ingest:[/green] {raw_clip.name} ({dur:.1f}s)")
@@ -551,7 +579,7 @@ def auto_clip_vod(
 
         update_clip_record(clip_id, status="compositing")
 
-        # Resolve webcam & layout mode with --cam-corner override & Gemini Vision fallback
+        # Resolve webcam & layout mode with --cam-corner override, AI Universal Router & Gemini Vision fallback
         clip_layout = layout
         clip_bbox = parsed_bbox
         clip_speaker_x = 0.5
@@ -563,6 +591,18 @@ def auto_clip_vod(
             clip_layout = LayoutMode.GAMING_SPLIT
             clip_bbox = CORNER_MAP[norm_corner]
             console.print(f"  [green]✓ Webcam Corner Override ({norm_corner}):[/green] {clip_bbox} -> gaming_split")
+        elif layout == LayoutMode.AUTO:
+            from modules.brain import classify_video_layout_vision
+            try:
+                classified_l, det_cam, det_spk = classify_video_layout_vision(raw_clip, vod_key=vod_id)
+                clip_layout = LayoutMode(classified_l)
+                if det_cam:
+                    clip_bbox = det_cam
+                clip_speaker_x = det_spk
+                console.print(f"  [green]✓ Universal AI Layout Router:[/green] selected '{clip_layout.value}' (speaker_x={clip_speaker_x:.2f})")
+            except Exception as exc:
+                console.print(f"  [yellow]Layout classification failed ({exc}); falling back to cinema_blur[/yellow]")
+                clip_layout = LayoutMode.CINEMA_BLUR
         elif layout == LayoutMode.GAMING_SPLIT and not user_overrode_bbox:
             detected_bbox, detected_speaker_x = detect_facecam(raw_clip, vod_key=vod_id)
             if detected_bbox is not None:
@@ -604,7 +644,7 @@ def auto_clip_vod(
                     c_end = dur
 
                 if clip_words:
-                    ass_file = DOWNLOADS_DIR / f"clip_{clip_id}.ass"
+                    ass_file = vod_downloads_dir / f"clip_{clip_id}.ass"
                     generate_ass_subtitles(
                         words=clip_words,
                         output_path=ass_file,
@@ -718,13 +758,17 @@ def ingest_audio(
     ),
 ):
     """Downloads audio-only (MP3) for Stage 2 Whisper transcription."""
+    vod_id = extract_video_id(url)
+    vod_downloads_dir = DOWNLOADS_DIR / vod_id
+    vod_downloads_dir.mkdir(parents=True, exist_ok=True)
     with console.status("[bold green]Downloading MP3 audio..."):
         try:
             audio_path = download_audio_only(
                 url=url,
                 start_time=start_time,
                 end_time=end_time,
-                output_dir=DOWNLOADS_DIR,
+                output_dir=vod_downloads_dir,
+                prefix=f"{vod_id}_audio",
             )
             console.print(f"[green]✓ Audio saved to:[/green] {audio_path}")
         except Exception as exc:

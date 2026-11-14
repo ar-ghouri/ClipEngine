@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClipEngine Studio</title>
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f5f3ff',
+              100: '#ede9fe',
+              500: '#8b5cf6',
+              600: '#7c3aed',
+              700: '#6d28d9',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <!-- Alpine.js via CDN -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #09090b; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+  </style>
+</head>
+
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans antialiased selection:bg-brand-600 selection:text-white" x-data="studioApp()" x-init="initApp()" x-cloak>
+
+  <!-- Top Sticky Navigation Bar -->
+  <header class="sticky top-0 z-40 bg-zinc-900/80 backdrop-blur-md border-b border-zinc-800">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      
+      <!-- Studio Brand & Hardware Badge -->
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-brand-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-brand-500/20">
+          <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center space-x-2">
+            <h1 class="text-lg font-bold tracking-tight text-white">ClipEngine <span class="text-brand-500 font-extrabold">Studio</span></h1>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              RTX 4060 Local
+            </span>
+          </div>
+          <p class="text-xs text-zinc-400">Zero-Cost AI Viral Shorts Generator & Studio Review</p>
+        </div>
+      </div>
+
+      <!-- Studio Metrics Bar -->
+      <div class="hidden md:flex items-center space-x-6 text-sm">
+        <div class="flex items-center space-x-2">
+          <span class="text-zinc-400">Active Clips:</span>
+          <span class="font-bold text-white bg-zinc-800 px-2.5 py-0.5 rounded-md border border-zinc-700" x-text="stats.active_clips || 0"></span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <span class="text-zinc-400">Approved:</span>
+          <span class="font-bold text-emerald-400 bg-emerald-950/40 px-2.5 py-0.5 rounded-md border border-emerald-800/40" x-text="stats.approved_count || 0"></span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <span class="text-zinc-400">Posted:</span>
+          <span class="font-bold text-blue-400 bg-blue-950/40 px-2.5 py-0.5 rounded-md border border-blue-800/40" x-text="stats.posted_count || 0"></span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <span class="text-zinc-400">Total Views:</span>
+          <span class="font-bold text-amber-400 bg-amber-950/40 px-2.5 py-0.5 rounded-md border border-amber-800/40" x-text="formatViews(stats.total_views || 0)"></span>
+        </div>
+      </div>
+
+      <!-- Refresh Button -->
+      <div class="flex items-center space-x-3">
+        <button @click="loadData()" class="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors border border-zinc-700" title="Refresh library">
+          <svg class="w-5 h-5" :class="{'animate-spin': isRefreshing}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Studio Workspace -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+    <!-- Section 1: Job Creation Bar / Launchpad -->
+    <section class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
+      <div class="absolute -top-24 -right-24 w-72 h-72 bg-brand-600/10 rounded-full blur-3xl pointer-events-none"></div>
+
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-base font-semibold text-white flex items-center space-x-2">
+          <svg class="w-5 h-5 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+          <span>Auto-Clip VOD Pipeline</span>
+        </h2>
+        <span class="text-xs text-zinc-400">Targeted smart section ingest • Whispered on RTX 4060 • Gemini AI Director</span>
+      </div>
+
+      <form @submit.prevent="submitJob()" class="space-y-4">
+        <!-- VOD URL & AI Prompt Inputs -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          <div class="lg:col-span-6">
+            <label class="block text-xs font-medium text-zinc-300 mb-1.5">YouTube Stream / VOD URL</label>
+            <div class="relative">
+              <input
+                type="url"
+                required
+                x-model="form.url"
+                placeholder="https://www.youtube.com/watch?v=..."
+                class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+              />
+            </div>
+          </div>
+
+          <div class="lg:col-span-6">
+            <label class="block text-xs font-medium text-zinc-300 mb-1.5">
+              AI Director Prompt Steering <span class="text-zinc-500 font-normal">(Optional)</span>
+            </label>
+            <input
+              type="text"
+              x-model="form.prompt"
+              placeholder="e.g. Focus on funny reactions, jumpscares, screams, or punchlines"
+              class="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"
+            />
+          </div>
+        </div>
+
+        <!-- Controls Row -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 pt-1">
+          <!-- Max Clips -->
+          <div>
+            <label class="block text-xs font-medium text-zinc-400 mb-1">Clips Count</label>
+            <select x-model="form.max_clips" class="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:border-brand-500 focus:outline-none">
+              <option value="1">1 Clip (Quick)</option>
+              <option value="2">2 Clips</option>
+              <option value="3">3 Clips (Default)</option>
+              <option value="5">5 Clips</option>
+              <option value="10">10 Clips</option>
+            </select>
+          </div>
+
+          <!-- Layout Mode -->
+          <div>
+            <label class="block text-xs font-medium text-zinc-400 mb-1">Layout Mode</label>
+            <select x-model="form.layout" class="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:border-brand-500 focus:outline-none">
+              <option value="auto">Auto (Universal AI Router)</option>
+              <option value="cinema_blur">Cinema Blur (Slides / Wide 16:9)</option>
+              <option value="gaming_split">Gaming Split (Cam + Game)</option>
+              <option value="center_crop">Center Crop (9:16 Full)</option>
+            </select>
+          </div>
+
+          <!-- Cam Corner Override -->
+          <div>
+            <label class="block text-xs font-medium text-zinc-400 mb-1">Cam Corner</label>
+            <select x-model="form.cam_corner" class="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:border-brand-500 focus:outline-none">
+              <option value="auto">Auto (Vision / Haar)</option>
+              <option value="top-left">Top-Left</option>
+              <option value="top-right">Top-Right</option>
+              <option value="bottom-left">Bottom-Left</option>
+              <option value="bottom-right">Bottom-Right</option>
+              <option value="none">None (Force Center)</option>
+            </select>
+          </div>
+
+          <!-- Fast-Subs Switch -->
+          <div class="flex flex-col justify-center">
+            <label class="text-xs font-medium text-zinc-400 mb-1">Fast-Subs</label>
+            <label class="flex items-center space-x-2 cursor-pointer pt-1">
+              <input type="checkbox" x-model="form.fast_subs" class="sr-only peer" />
+              <div class="w-9 h-5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-brand-600 relative"></div>
+              <span class="text-xs text-zinc-300 font-medium">3s Subtitles</span>
+            </label>
+          </div>
+
+          <!-- BGM Switch -->
+          <div class="flex flex-col justify-center">
+            <label class="text-xs font-medium text-zinc-400 mb-1">Vibe BGM</label>
+            <label class="flex items-center space-x-2 cursor-pointer pt-1">
+              <input type="checkbox" x-model="form.bgm" class="sr-only peer" />
+              <div class="w-9 h-5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-brand-600 relative"></div>
+              <span class="text-xs text-zinc-300 font-medium">Auto-Ducked</span>
+            </label>
+          </div>
+
+          <!-- Submit Button -->
+          <div class="flex items-end">
+            <button
+              type="submit"
+              :disabled="isSubmitting"
+              class="w-full bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white text-xs font-bold py-2.5 px-4 rounded-xl shadow-lg shadow-brand-500/25 transition duration-150 flex items-center justify-center space-x-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <svg x-show="!isSubmitting" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <svg x-show="isSubmitting" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+              </svg>
+              <span x-text="isSubmitting ? 'Starting...' : 'Generate'"></span>
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <!-- Section 2: Active Job Progress Panel & History Drawer -->
+    <div class="space-y-4">
+      <!-- Active Job Panel -->
+      <template x-if="activeJob">
+        <section class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-xl space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex items-center space-x-3">
+              <!-- Status Badge -->
+              <span
+                class="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5"
+                :class="{
+                  'bg-amber-500/10 text-amber-400 border border-amber-500/20': activeJob.status === 'queued',
+                  'bg-brand-500/10 text-brand-400 border border-brand-500/20 animate-pulse': activeJob.status === 'running',
+                  'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20': activeJob.status === 'completed',
+                  'bg-rose-500/10 text-rose-400 border border-rose-500/20': activeJob.status === 'failed',
+                  'bg-zinc-500/10 text-zinc-400 border border-zinc-500/20': activeJob.status === 'cancelled'
+                }"
+              >
+                <span class="w-2 h-2 rounded-full"
+                  :class="{
+                    'bg-amber-400': activeJob.status === 'queued',
+                    'bg-brand-400': activeJob.status === 'running',
+                    'bg-emerald-400': activeJob.status === 'completed',
+                    'bg-rose-400': activeJob.status === 'failed',
+                    'bg-zinc-400': activeJob.status === 'cancelled'
+                  }">
+                </span>
+                <span x-text="activeJob.status"></span>
+              </span>
+
+              <div>
+                <span class="text-sm font-semibold text-white" x-text="activeJob.step || 'Processing...'"></span>
+                <span class="text-xs text-zinc-400 block truncate max-w-md" x-text="activeJob.url"></span>
+              </div>
+            </div>
+
+            <!-- Actions & Timers -->
+            <div class="flex items-center space-x-3">
+              <template x-if="activeJob.status === 'running' || activeJob.status === 'queued'">
+                <button
+                  @click="cancelJob(activeJob.id)"
+                  class="px-3 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 text-xs font-semibold flex items-center space-x-1 transition-colors"
+                >
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                  </svg>
+                  <span>Cancel Job</span>
+                </button>
+              </template>
+              <button
+                @click="showLogs = !showLogs"
+                class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium border border-zinc-700"
+                x-text="showLogs ? 'Hide Logs' : 'View Logs'"
+              ></button>
+            </div>
+          </div>
+
+          <!-- Progress Bar -->
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-xs text-zinc-400">
+              <span>Pipeline Progress</span>
+              <span class="font-mono font-semibold text-zinc-200" x-text="activeJob.progress + '%'"></span>
+            </div>
+            <div class="w-full bg-zinc-950 rounded-full h-2.5 overflow-hidden border border-zinc-800">
+              <div
+                class="h-full bg-gradient-to-r from-brand-600 via-indigo-500 to-emerald-400 transition-all duration-300"
+                :style="'width: ' + activeJob.progress + '%'"
+              ></div>
+            </div>
+          </div>
+
+          <!-- Error box if failed -->
+          <div x-show="activeJob.status === 'failed' && activeJob.error" class="p-3 bg-rose-950/40 border border-rose-800/50 rounded-xl text-xs text-rose-200">
+            <span class="font-bold">Error: </span>
+            <span x-text="activeJob.error"></span>
+          </div>
+
+          <!-- Collapsible Log Drawer -->
+          <div x-show="showLogs" class="bg-zinc-950 rounded-xl p-3 border border-zinc-800 font-mono text-[11px] text-zinc-300 max-h-48 overflow-y-auto space-y-1">
+            <template x-for="(line, idx) in (activeJob.log_tail || [])" :key="idx">
+              <div class="leading-relaxed" x-text="line"></div>
+            </template>
+            <div x-show="!activeJob.log_tail || activeJob.log_tail.length === 0" class="text-zinc-600 italic">No output lines yet...</div>
+          </div>
+        </section>
+      </template>
+
+      <!-- Idle Progress Bar (when no job is actively processing) -->
+      <template x-if="!activeJob">
+        <section class="bg-zinc-900/60 border border-zinc-800 rounded-2xl px-6 py-4 flex items-center justify-between text-xs text-zinc-400 shadow-md">
+          <div class="flex items-center space-x-3">
+            <span class="flex h-2.5 w-2.5 relative">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+            </span>
+            <span class="text-zinc-200 font-semibold">Idle</span>
+            <span class="text-zinc-500">— Ready for next video</span>
+          </div>
+          <div class="flex items-center space-x-3 text-zinc-500 font-mono">
+            <span>Progress: 0%</span>
+          </div>
+        </section>
+      </template>
+
+      <!-- Recent Jobs History Drawer -->
+      <div class="bg-zinc-900/70 border border-zinc-800 rounded-2xl overflow-hidden shadow">
+        <button
+          @click="showJobHistory = !showJobHistory"
+          class="w-full px-5 py-3 flex items-center justify-between text-xs font-semibold text-zinc-300 hover:text-white bg-zinc-900/90 transition-colors"
+        >
+          <div class="flex items-center space-x-2">
+            <svg class="w-4 h-4 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span>Recent Jobs History</span>
+            <span class="text-zinc-500 font-normal" x-text="'(' + jobsList.length + ' jobs)'"></span>
+          </div>
+          <svg class="w-4 h-4 transform transition-transform" :class="{'rotate-180': showJobHistory}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+
+        <div x-show="showJobHistory" x-transition class="p-4 border-t border-zinc-800 space-y-2">
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs text-left">
+              <thead class="text-[11px] text-zinc-500 uppercase border-b border-zinc-800">
+                <tr>
+                  <th class="pb-2">ID</th>
+                  <th class="pb-2">Status</th>
+                  <th class="pb-2">VOD URL</th>
+                  <th class="pb-2">Layout</th>
+                  <th class="pb-2">Clips</th>
+                  <th class="pb-2">Time</th>
+                  <th class="pb-2 text-right">Logs</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-zinc-800/60">
+                <template x-for="j in jobsList" :key="j.id">
+                  <tr class="hover:bg-zinc-800/40">
+                    <td class="py-2.5 font-mono text-zinc-400" x-text="'#' + j.id"></td>
+                    <td class="py-2.5">
+                      <span
+                        class="px-2 py-0.5 rounded text-[10px] font-bold uppercase"
+                        :class="{
+                          'bg-emerald-950 text-emerald-400 border border-emerald-800': j.status === 'completed',
+                          'bg-rose-950 text-rose-400 border border-rose-800': j.status === 'failed',
+                          'bg-brand-950 text-brand-400 border border-brand-800': j.status === 'running',
+                          'bg-zinc-800 text-zinc-400': j.status === 'cancelled' || j.status === 'queued'
+                        }"
+                        x-text="j.status"
+                      ></span>
+                    </td>
+                    <td class="py-2.5 truncate max-w-xs text-zinc-300" x-text="j.url"></td>
+                    <td class="py-2.5 font-mono text-zinc-400" x-text="j.layout || 'auto'"></td>
+                    <td class="py-2.5 text-zinc-400" x-text="j.max_clips"></td>
+                    <td class="py-2.5 text-zinc-500 font-mono text-[11px]" x-text="formatDate(j.created_at)"></td>
+                    <td class="py-2.5 text-right">
+                      <button
+                        @click="viewJobLogs(j.id)"
+                        class="text-brand-400 hover:text-brand-300 text-[11px] underline font-medium"
+                      >
+                        Logs
+                      </button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 3: Clips Library & Review Workspace -->
+    <section class="space-y-6">
+
+      <!-- Filter & Search Controls -->
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-zinc-900 border border-zinc-800 p-4 rounded-xl">
+        
+        <!-- Status Tabs -->
+        <div class="flex items-center space-x-1 overflow-x-auto pb-1 md:pb-0">
+          <button
+            @click="filters.status = 'all'"
+            :class="filters.status === 'all' ? 'bg-brand-600 text-white font-bold' : 'text-zinc-400 hover:text-white bg-zinc-800'"
+            class="px-3 py-1.5 rounded-lg text-xs transition-colors"
+          >
+            All Active (<span x-text="allActiveCount"></span>)
+          </button>
+          <button
+            @click="filters.status = 'new'"
+            :class="filters.status === 'new' ? 'bg-brand-600 text-white font-bold' : 'text-zinc-400 hover:text-white bg-zinc-800'"
+            class="px-3 py-1.5 rounded-lg text-xs transition-colors"
+          >
+            New
+          </button>
+          <button
+            @click="filters.status = 'approved'"
+            :class="filters.status === 'approved' ? 'bg-emerald-600 text-white font-bold' : 'text-zinc-400 hover:text-white bg-zinc-800'"
+            class="px-3 py-1.5 rounded-lg text-xs transition-colors"
+          >
+            Approved
+          </button>
+          <button
+            @click="filters.status = 'posted'"
+            :class="filters.status === 'posted' ? 'bg-blue-600 text-white font-bold' : 'text-zinc-400 hover:text-white bg-zinc-800'"
+            class="px-3 py-1.5 rounded-lg text-xs transition-colors"
+          >
+            Posted
+          </button>
+          <button
+            @click="filters.status = 'rejected'"
+            :class="filters.status === 'rejected' ? 'bg-zinc-600 text-white font-bold' : 'text-zinc-400 hover:text-white bg-zinc-800'"
+            class="px-3 py-1.5 rounded-lg text-xs transition-colors"
+          >
+            Rejected
+          </button>
+        </div>
+
+        <!-- Folder Dropdown & Search -->
+        <div class="flex flex-wrap items-center gap-3">
+          <!-- Folder select -->
+          <select x-model="filters.folder" class="bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-brand-500">
+            <option value="all">📁 All Stream Folders</option>
+            <template x-for="f in folders" :key="f">
+              <option :value="f" x-text="'📁 ' + f"></option>
+            </template>
+          </select>
+
+          <!-- Min Score select -->
+          <select x-model="filters.minScore" class="bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-brand-500">
+            <option value="0">🔥 Any Virality Score</option>
+            <option value="7">🔥 7.0+ Score</option>
+            <option value="8">🔥 8.0+ Score</option>
+            <option value="9">🔥 9.0+ Score (Viral Peak)</option>
+          </select>
+
+          <!-- Search Input -->
+          <input
+            type="text"
+            x-model="filters.search"
+            placeholder="Search hook titles..."
+            class="bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-brand-500 w-44"
+          />
+        </div>
+      </div>
+
+      <!-- Clips Grouped by Stream Folder -->
+      <template x-for="group in groupedClips" :key="group.folder">
+        <div class="space-y-4">
+          <!-- Folder Header -->
+          <div class="flex items-center justify-between border-b border-zinc-800 pb-2 pt-2">
+            <div class="flex items-center space-x-2">
+              <span class="text-brand-500 font-mono text-base">📁</span>
+              <h3 class="text-sm font-bold text-zinc-100" x-text="group.folder"></h3>
+              <span class="text-xs text-zinc-400 bg-zinc-800 px-2 py-0.5 rounded-full" x-text="group.clips.length + ' clips'"></span>
+            </div>
+            
+            <template x-if="group.clips.length > 0">
+              <button
+                @click="openClipFolder(group.clips[0].id)"
+                class="text-xs text-zinc-400 hover:text-white flex items-center space-x-1 bg-zinc-900 hover:bg-zinc-800 px-2.5 py-1 rounded-md border border-zinc-800 transition-colors"
+                title="Open stream folder in Windows Explorer"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"/>
+                </svg>
+                <span>Reveal Folder</span>
+              </button>
+            </template>
+          </div>
+
+          <!-- 9:16 Shorts Responsive Card Grid -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-6">
+            <template x-for="clip in group.clips" :key="clip.id">
+              <div class="bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-2xl overflow-hidden shadow-lg transition-all duration-200 flex flex-col justify-between">
+                
+                <!-- Video Container (9:16 Vertical Ratio with object-contain & max-h-420px) -->
+                <div class="relative bg-black aspect-[9/16] w-full max-h-[420px] rounded-xl overflow-hidden flex items-center justify-center mx-auto group">
+                  <video
+                    controls
+                    playsinline
+                    preload="metadata"
+                    class="w-full h-full object-contain bg-black"
+                    :src="clip.video_url"
+                  ></video>
+
+                  <!-- Floating Virality Score Badge -->
+                  <div class="absolute top-2 left-2 flex items-center space-x-1 bg-zinc-950/80 backdrop-blur-md px-2 py-0.5 rounded-full text-xs font-bold border border-zinc-800 text-amber-400">
+                    <span>🔥</span>
+                    <span x-text="clip.virality_score ? clip.virality_score.toFixed(1) : '—'"></span>
+                  </div>
+
+                  <!-- Dramatic Climax Punch Indicator -->
+                  <template x-if="clip.use_dramatic_punch">
+                    <div class="absolute top-2 right-11 bg-rose-950/90 backdrop-blur-md text-rose-300 text-[10px] font-extrabold px-2 py-0.5 rounded-full border border-rose-800/80 flex items-center space-x-0.5">
+                      <span>⚡</span>
+                      <span>PUNCH</span>
+                    </div>
+                  </template>
+
+                  <!-- 9:16 Theater Expand Button -->
+                  <button
+                    @click="openTheater(clip)"
+                    class="absolute top-2 right-2 p-1.5 rounded-lg bg-zinc-950/80 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 backdrop-blur-md transition-colors shadow"
+                    title="Expand 9:16 Theater Mode"
+                  >
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
+                    </svg>
+                  </button>
+                </div>
+
+                <!-- Card Body -->
+                <div class="p-4 space-y-3 flex-1 flex flex-col justify-between">
+                  <div class="space-y-3">
+                    <!-- Vibe & Duration Tags -->
+                    <div class="flex items-center justify-between text-[11px] text-zinc-400">
+                      <span class="px-2 py-0.5 rounded bg-zinc-800 font-medium text-zinc-300" x-text="clip.vibe || 'viral_short'"></span>
+                      <span class="font-mono text-zinc-500" x-text="clip.duration ? clip.duration + 's' : ''"></span>
+                    </div>
+
+                    <!-- Hook Title & Copy Button -->
+                    <div class="flex items-start justify-between gap-1 group">
+                      <p class="text-xs font-semibold text-zinc-100 line-clamp-2 leading-snug" x-text="clip.hook_title || 'Untitled Clip'"></p>
+                      <button
+                        @click="copyToClipboard(clip.hook_title)"
+                        class="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors flex-shrink-0"
+                        title="Copy hook title"
+                      >
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                        </svg>
+                      </button>
+                    </div>
+
+                    <!-- Direct-to-Upload Publishing Kit -->
+                    <div class="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-2.5 space-y-2">
+                      <div class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+                        <span class="flex items-center space-x-1">
+                          <span>🚀</span>
+                          <span>Publishing Kit</span>
+                        </span>
+                        <span class="text-[9px] text-zinc-500 font-normal">Ready to post</span>
+                      </div>
+
+                      <!-- Action Row: Copy Caption + Download MP4 -->
+                      <div class="grid grid-cols-2 gap-1.5">
+                        <button
+                          @click="copyUploadCaption(clip)"
+                          class="w-full bg-brand-600/20 hover:bg-brand-600/30 text-brand-300 border border-brand-500/30 text-[11px] font-semibold py-1.5 px-2 rounded-lg flex items-center justify-center space-x-1 transition-colors"
+                          title="Copy title + #shorts #viral #trending"
+                        >
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                          </svg>
+                          <span>Caption</span>
+                        </button>
+
+                        <a
+                          :href="clip.video_url"
+                          :download="(clip.hook_title || 'clip') + '.mp4'"
+                          class="w-full bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold py-1.5 px-2 rounded-lg flex items-center justify-center space-x-1 transition-colors text-center"
+                          title="Download rendered MP4"
+                        >
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                          </svg>
+                          <span>Download</span>
+                        </a>
+                      </div>
+
+                      <!-- Quick-Launch Platform Badges -->
+                      <div class="flex items-center justify-between gap-1 pt-0.5">
+                        <a
+                          href="https://studio.youtube.com/channel/UC/videos/upload?d=ud"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="flex-1 bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/40 text-[10px] font-medium py-1 rounded text-center transition-colors"
+                          title="Open YouTube Shorts upload"
+                        >
+                          YT Shorts
+                        </a>
+                        <a
+                          href="https://www.tiktok.com/creator-center/upload?from=webapp"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="flex-1 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-300 border border-cyan-800/40 text-[10px] font-medium py-1 rounded text-center transition-colors"
+                          title="Open TikTok creator upload"
+                        >
+                          TikTok
+                        </a>
+                        <a
+                          href="https://www.instagram.com/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="flex-1 bg-pink-950/40 hover:bg-pink-900/50 text-pink-300 border border-pink-800/40 text-[10px] font-medium py-1 rounded text-center transition-colors"
+                          title="Open Instagram upload"
+                        >
+                          Reels
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Review Status Action Pills -->
+                  <div class="space-y-2">
+                    <div class="grid grid-cols-4 gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-[11px] font-medium text-center">
+                      <button
+                        @click="updateStatus(clip.id, 'new')"
+                        :class="clip.review_status === 'new' ? 'bg-zinc-700 text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'"
+                        class="py-1 rounded transition-colors"
+                      >New</button>
+                      <button
+                        @click="updateStatus(clip.id, 'approved')"
+                        :class="clip.review_status === 'approved' ? 'bg-emerald-600 text-white font-bold shadow' : 'text-zinc-400 hover:text-emerald-400'"
+                        class="py-1 rounded transition-colors"
+                      >Appr</button>
+                      <button
+                        @click="updateStatus(clip.id, 'posted')"
+                        :class="clip.review_status === 'posted' ? 'bg-blue-600 text-white font-bold shadow' : 'text-zinc-400 hover:text-blue-400'"
+                        class="py-1 rounded transition-colors"
+                      >Post</button>
+                      <button
+                        @click="updateStatus(clip.id, 'rejected')"
+                        :class="clip.review_status === 'rejected' ? 'bg-rose-900/80 text-rose-200 font-bold' : 'text-zinc-400 hover:text-rose-400'"
+                        class="py-1 rounded transition-colors"
+                      >Rej</button>
+                    </div>
+
+                    <!-- Post Tracking Details Drawer (Shown when status is 'posted') -->
+                    <div x-show="clip.review_status === 'posted'" class="bg-zinc-950/80 border border-blue-900/40 rounded-lg p-2 space-y-2 text-xs">
+                      <div class="grid grid-cols-2 gap-1.5">
+                        <select
+                          x-model="clip.platform"
+                          @change="saveClipMeta(clip)"
+                          class="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[11px] text-zinc-200"
+                        >
+                          <option value="">Platform</option>
+                          <option value="TikTok">TikTok</option>
+                          <option value="YouTube Shorts">YT Shorts</option>
+                          <option value="Instagram">Reels</option>
+                          <option value="X">Twitter / X</option>
+                        </select>
+                        <input
+                          type="number"
+                          placeholder="Views"
+                          x-model.number="clip.views"
+                          @blur="saveClipMeta(clip)"
+                          class="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[11px] text-zinc-200"
+                        />
+                      </div>
+                      <input
+                        type="url"
+                        placeholder="Posted Link URL..."
+                        x-model="clip.posted_url"
+                        @blur="saveClipMeta(clip)"
+                        class="w-full bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[11px] text-zinc-200 placeholder-zinc-500"
+                      />
+                    </div>
+
+                    <!-- Inline Notes Input -->
+                    <input
+                      type="text"
+                      placeholder="Notes (tags, caption ideas)..."
+                      x-model="clip.notes"
+                      @blur="saveClipMeta(clip)"
+                      class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-[11px] text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-zinc-600"
+                    />
+
+                    <!-- Card Bottom Actions (Open Folder + Trash) -->
+                    <div class="flex items-center justify-between pt-1 border-t border-zinc-800/80 text-xs">
+                      <button
+                        @click="openClipFolder(clip.id)"
+                        class="text-zinc-400 hover:text-white flex items-center space-x-1 text-[11px] transition-colors"
+                        title="Reveal in Windows Explorer"
+                      >
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                        </svg>
+                        <span>Reveal</span>
+                      </button>
+
+                      <button
+                        @click="trashClip(clip.id)"
+                        class="text-zinc-500 hover:text-rose-400 flex items-center space-x-1 text-[11px] transition-colors"
+                        title="Move to trash"
+                      >
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                        </svg>
+                        <span>Trash</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- Empty State -->
+      <div x-show="groupedClips.length === 0" class="text-center py-16 bg-zinc-900/40 rounded-2xl border border-zinc-800">
+        <svg class="mx-auto h-12 w-12 text-zinc-600 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/>
+        </svg>
+        <h4 class="text-base font-semibold text-zinc-300">No clips found</h4>
+        <p class="text-xs text-zinc-500 max-w-sm mx-auto mt-1">Submit a YouTube URL above to generate your first set of viral 9:16 Shorts with RTX 4060 hardware acceleration.</p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Notification Toast -->
+  <div
+    x-show="toast.visible"
+    x-transition
+    class="fixed bottom-6 right-6 z-50 bg-zinc-900 border border-zinc-700 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center space-x-2 text-xs"
+  >
+    <span class="text-brand-400">✓</span>
+    <span x-text="toast.message"></span>
+  </div>
+
+  <!-- 9:16 Vertical Theater Modal -->
+  <div
+    x-show="theaterModal.open"
+    x-transition.opacity
+    class="fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex items-center justify-center p-4"
+    @keydown.escape.window="closeTheater()"
+    x-cloak
+  >
+    <div class="relative flex flex-col items-center max-w-md w-full max-h-[95vh] animate-in fade-in zoom-in-95 duration-150">
+      <!-- Close button -->
+      <button
+        @click="closeTheater()"
+        class="absolute -top-11 right-0 text-zinc-400 hover:text-white p-1.5 rounded-xl bg-zinc-900 border border-zinc-800 transition-colors"
+        title="Close Theater (Esc)"
+      >
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+
+      <!-- Modal Header -->
+      <div class="w-full bg-zinc-900 border-t border-x border-zinc-800 rounded-t-2xl p-3.5 flex items-center justify-between gap-3">
+        <div class="truncate">
+          <h3 class="text-xs font-bold text-white truncate" x-text="theaterModal.clip?.hook_title || 'Clip Preview'"></h3>
+          <span class="text-[11px] text-zinc-400" x-text="(theaterModal.clip?.duration || '') + 's • ' + (theaterModal.clip?.vibe || 'Shorts')"></span>
+        </div>
+        <div class="flex items-center space-x-2 flex-shrink-0">
+          <button
+            @click="copyUploadCaption(theaterModal.clip)"
+            class="bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors flex items-center space-x-1"
+          >
+            <span>Caption</span>
+          </button>
+          <a
+            :href="theaterModal.clip?.video_url"
+            :download="(theaterModal.clip?.hook_title || 'clip') + '.mp4'"
+            class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors flex items-center space-x-1"
+          >
+            <span>Download</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- Video Player (Max 80vh, true 9:16 aspect, object-contain) -->
+      <div class="bg-black w-full flex items-center justify-center border border-zinc-800 rounded-b-2xl overflow-hidden shadow-2xl">
+        <video
+          x-ref="theaterVideo"
+          controls
+          autoplay
+          playsinline
+          class="h-[78vh] max-h-[82vh] aspect-[9/16] object-contain bg-black"
+          :src="theaterModal.clip?.video_url"
+        ></video>
+      </div>
+    </div>
+  </div>
+
+  <!-- Studio App Script -->
+  <script>
+    function studioApp() {
+      return {
+        form: {
+          url: '',
+          prompt: '',
+          max_clips: 3,
+          layout: 'auto',
+          cam_corner: 'auto',
+          fast_subs: true,
+          bgm: true,
+        },
+        filters: {
+          status: 'all',
+          folder: 'all',
+          minScore: 0,
+          search: '',
+        },
+        theaterModal: {
+          open: false,
+          clip: null,
+        },
+        showJobHistory: false,
+        jobsList: [],
+        completedResetTimer: null,
+        isSubmitting: false,
+        isRefreshing: false,
+        showLogs: false,
+        activeJob: null,
+        clips: [],
+        folders: [],
+        stats: {},
+        toast: { visible: false, message: '' },
+        pollTimer: null,
+
+        get allActiveCount() {
+          return this.clips.length;
+        },
+
+        get filteredClips() {
+          return this.clips.filter(c => {
+            if (this.filters.status !== 'all' && c.review_status !== this.filters.status) return false;
+            if (this.filters.folder !== 'all' && c.stream_folder !== this.filters.folder) return false;
+            if (this.filters.minScore > 0 && (!c.virality_score || c.virality_score < Number(this.filters.minScore))) return false;
+            if (this.filters.search) {
+              const q = this.filters.search.toLowerCase();
+              const titleMatch = (c.hook_title || '').toLowerCase().includes(q);
+              const noteMatch = (c.notes || '').toLowerCase().includes(q);
+              if (!titleMatch && !noteMatch) return false;
+            }
+            return true;
+          });
+        },
+
+        get groupedClips() {
+          const groups = {};
+          for (const c of this.filteredClips) {
+            const folder = c.stream_folder || 'Root_Clips';
+            if (!groups[folder]) groups[folder] = [];
+            groups[folder].push(c);
+          }
+          return Object.keys(groups).sort().map(folder => ({
+            folder,
+            clips: groups[folder]
+          }));
+        },
+
+        initApp() {
+          this.loadData();
+          this.startPolling();
+        },
+
+        async loadData() {
+          this.isRefreshing = true;
+          try {
+            await Promise.all([this.fetchJobs(), this.fetchClips()]);
+          } catch (e) {
+            console.error('Error loading data:', e);
+          } finally {
+            this.isRefreshing = false;
+          }
+        },
+
+        async fetchJobs() {
+          try {
+            const res = await fetch('/api/jobs');
+            if (!res.ok) return;
+            const data = await res.json();
+            this.jobsList = data.jobs || [];
+            if (this.jobsList.length > 0) {
+              const latest = this.jobsList[0];
+              // Fetch detail with logs if latest job is running or queued
+              if (latest.status === 'running' || latest.status === 'queued') {
+                const detailRes = await fetch('/api/jobs/' + latest.id);
+                if (detailRes.ok) {
+                  const detailData = await detailRes.json();
+                  this.activeJob = detailData.job;
+                } else {
+                  this.activeJob = latest;
+                }
+              } else if (this.activeJob && this.activeJob.id === latest.id) {
+                // If it just completed or failed and timer hasn't cleared it yet
+                if (this.activeJob.status !== 'completed') {
+                  this.activeJob = latest;
+                }
+              }
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        async loadClips() {
+          await this.fetchClips();
+        },
+
+        async fetchClips() {
+          try {
+            const res = await fetch('/api/clips');
+            if (!res.ok) return;
+            const data = await res.json();
+            this.clips = data.clips || [];
+            this.folders = data.folders || [];
+            this.stats = data.stats || {};
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        startPolling() {
+          if (this.pollTimer) clearInterval(this.pollTimer);
+          this.pollTimer = setInterval(async () => {
+            const prevStatus = this.activeJob ? this.activeJob.status : null;
+            await this.fetchJobs();
+            const currStatus = this.activeJob ? this.activeJob.status : null;
+
+            // Auto-trigger loadClips() when a job transitions into completed
+            if (prevStatus !== 'completed' && currStatus === 'completed') {
+              await this.loadClips();
+              this.showToast('100% — Completed! Clips added to studio below');
+              if (this.activeJob) {
+                this.activeJob.step = '100% — Completed! Clips added to studio below';
+                this.activeJob.progress = 100;
+              }
+              // Reset active progress bar to 0% idle state after 3 seconds
+              if (this.completedResetTimer) clearTimeout(this.completedResetTimer);
+              this.completedResetTimer = setTimeout(() => {
+                if (this.activeJob && this.activeJob.status === 'completed') {
+                  this.activeJob = null;
+                }
+              }, 3000);
+            }
+          }, 2000);
+        },
+
+        async submitJob() {
+          if (!this.form.url) return;
+          this.isSubmitting = true;
+          try {
+            const res = await fetch('/api/jobs', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                url: this.form.url,
+                prompt: this.form.prompt || null,
+                max_clips: Number(this.form.max_clips),
+                layout: this.form.layout,
+                cam_corner: this.form.cam_corner,
+                fast_subs: this.form.fast_subs,
+                no_bgm: !this.form.bgm,
+              }),
+            });
+            if (res.ok) {
+              const data = await res.json();
+              this.activeJob = data.job;
+              this.showToast('Job added to queue!');
+            } else {
+              const err = await res.json();
+              alert(err.detail || 'Failed to submit job');
+            }
+          } catch (e) {
+            alert('Failed to connect to ClipEngine server.');
+          } finally {
+            this.isSubmitting = false;
+          }
+        },
+
+        async cancelJob(jobId) {
+          if (!confirm('Are you sure you want to cancel this job?')) return;
+          try {
+            const res = await fetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' });
+            if (res.ok) {
+              this.showToast('Cancellation signal sent.');
+              await this.fetchJobs();
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        async updateStatus(clipId, newStatus) {
+          try {
+            const res = await fetch('/api/clips/' + clipId, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ review_status: newStatus })
+            });
+            if (res.ok) {
+              const clip = this.clips.find(c => c.id === clipId);
+              if (clip) clip.review_status = newStatus;
+              this.showToast('Status updated to ' + newStatus);
+              await this.fetchClips(); // Refresh metrics
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        async saveClipMeta(clip) {
+          try {
+            await fetch('/api/clips/' + clip.id, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                platform: clip.platform || '',
+                views: Number(clip.views) || 0,
+                posted_url: clip.posted_url || '',
+                notes: clip.notes || '',
+              })
+            });
+            await this.fetchClips(); // Refresh total views metric
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        async trashClip(clipId) {
+          if (!confirm('Move this clip to trash? The video file will be preserved in outputs/.trash/.')) return;
+          try {
+            const res = await fetch('/api/clips/' + clipId, { method: 'DELETE' });
+            if (res.ok) {
+              this.clips = this.clips.filter(c => c.id !== clipId);
+              this.showToast('Clip moved to trash');
+              await this.fetchClips();
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        async openClipFolder(clipId) {
+          try {
+            const res = await fetch('/api/clips/' + clipId + '/open-folder', { method: 'POST' });
+            if (res.ok) {
+              this.showToast('Opened in Windows Explorer');
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        openTheater(clip) {
+          if (!clip) return;
+          this.theaterModal.clip = clip;
+          this.theaterModal.open = true;
+          this.$nextTick(() => {
+            if (this.$refs.theaterVideo) {
+              this.$refs.theaterVideo.play().catch(() => {});
+            }
+          });
+        },
+
+        closeTheater() {
+          if (this.$refs.theaterVideo) {
+            this.$refs.theaterVideo.pause();
+          }
+          this.theaterModal.open = false;
+          this.theaterModal.clip = null;
+        },
+
+        copyUploadCaption(clip) {
+          if (!clip) return;
+          const tags = (clip.suggested_hashtags && clip.suggested_hashtags.length > 0)
+            ? clip.suggested_hashtags.join(' ')
+            : '#shorts #viral #trending';
+          const caption = `${clip.hook_title || 'Must Watch'} ${tags}`;
+          navigator.clipboard.writeText(caption);
+          this.showToast('Upload caption copied to clipboard!');
+        },
+
+        copyToClipboard(text) {
+          if (!text) return;
+          navigator.clipboard.writeText(text);
+          this.showToast('Hook title copied!');
+        },
+
+        viewJobLogs(jobId) {
+          fetch('/api/jobs/' + jobId)
+            .then(r => r.json())
+            .then(data => {
+              if (data && data.job) {
+                this.activeJob = data.job;
+                this.showLogs = true;
+                window.scrollTo({ top: 200, behavior: 'smooth' });
+              }
+            })
+            .catch(console.error);
+        },
+
+        formatDate(isoStr) {
+          if (!isoStr) return '';
+          try {
+            const d = new Date(isoStr);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          } catch (e) {
+            return isoStr;
+          }
+        },
+
+        showToast(msg) {
+          this.toast.message = msg;
+          this.toast.visible = true;
+          setTimeout(() => { this.toast.visible = false; }, 2500);
+        },
+
+        formatViews(num) {
+          if (!num) return '0';
+          if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+          if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+          return String(num);
+        }
+      };
+    }
+  </script>
+</body>
+</html>
+

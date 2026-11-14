@@ -73,6 +73,30 @@ def sanitize_title(title: str, max_chars: int = 60) -> str:
     return clean[:max_chars].rstrip("_")
 
 
+def extract_video_id(url: str) -> str:
+    """
+    Reliably extracts the 11-character YouTube video ID from any YouTube URL format
+    (youtu.be, watch?v=, /shorts/, /live/, /embed/, /v/), stripping ?si=, &t=, etc.
+    Raises ValueError if a valid 11-character ID cannot be found.
+    """
+    clean_url = str(url).strip()
+    # Check if raw string is already an 11-char YouTube ID
+    if re.fullmatch(r"[0-9A-Za-z_-]{11}", clean_url):
+        return clean_url
+
+    patterns = [
+        r"(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|live\/|embed\/|v\/)([0-9A-Za-z_-]{11})",
+        r"(?:https?:\/\/)?youtu\.be\/([0-9A-Za-z_-]{11})",
+        r"[?&]v=([0-9A-Za-z_-]{11})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, clean_url)
+        if m:
+            return m.group(1)
+
+    raise ValueError(f"Could not extract a valid 11-character YouTube video ID from URL: '{url}'")
+
+
 def get_video_metadata(url: str) -> Dict[str, Any]:
     """
     Fetches video metadata (title, duration, uploader, id) without downloading media.
@@ -284,22 +308,38 @@ def extract_youtube_captions(
     url: str,
     output_dir: Path = DOWNLOADS_DIR,
     prefix: str = "yt_subs",
+    video_id: Optional[str] = None,
 ) -> Optional[TranscriptionResult]:
     """
     Fast-path subtitle extraction using yt-dlp without downloading media.
     Fetches YouTube .json3 auto-subtitles (or manual captions) with word timestamps
     and converts them into a TranscriptionResult in ~3 seconds.
+    Isolates cache strictly by video_id: <video_id>_fastsubs.transcript.json.
 
     Args:
         url: Source YouTube video URL.
         output_dir: Destination folder for temporary .json3 subtitles.
         prefix: Subtitle file prefix.
+        video_id: Optional explicit YouTube video ID.
 
     Returns:
         TranscriptionResult if captions are available, otherwise None.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_template = str(output_dir / f"{prefix}_%(id)s.%(ext)s")
+    vid = video_id or extract_video_id(url)
+
+    # 1. Check strict video_id fast-subs cache first: <video_id>_fastsubs.transcript.json
+    cache_file = output_dir / f"{vid}_fastsubs.transcript.json"
+    if cache_file.exists():
+        try:
+            import json
+
+            cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
+            return TranscriptionResult.model_validate(cached_data)
+        except Exception:
+            pass
+
+    out_template = str(output_dir / f"{vid}_yt_subs_%(id)s.%(ext)s")
 
     cmd = [
         sys.executable,
@@ -324,9 +364,9 @@ def extract_youtube_captions(
     except Exception:
         return None
 
-    # Search for downloaded json3 files matching prefix
+    # Search STRICTLY for downloaded json3 files matching this video_id
     sub_files = sorted(
-        output_dir.glob(f"{prefix}_*.json3"),
+        output_dir.glob(f"*{vid}*.json3"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -402,12 +442,20 @@ def extract_youtube_captions(
         if not segments:
             return None
 
-        return TranscriptionResult(
+        result = TranscriptionResult(
             audio_path=f"fast_subs://{url}",
             language="en",
             duration=round(total_duration, 2),
             segments=segments,
         )
+
+        # Cache strictly by video_id: <video_id>_fastsubs.transcript.json
+        try:
+            cache_file.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+        return result
     except Exception:
         return None
 
