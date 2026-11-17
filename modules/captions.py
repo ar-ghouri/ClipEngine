@@ -275,12 +275,12 @@ def generate_ass_subtitles(
         style = CaptionStyle()
 
     # Layout-aware alignment and vertical anchor
-    is_cinema_blur = "cinema_blur" in layout.lower()
+    is_cinema_blur = ("cinema_blur" in layout.lower()) or (layout.lower() == "auto")
     is_gaming_split = "gaming_split" in layout.lower()
 
     if is_cinema_blur:
         alignment = 2       # Bottom-Center
-        margin_v = 420      # Anchored in bottom blurred space below 16:9 content
+        margin_v = 430      # Anchored in bottom blurred space below 16:9 content
         pos_tag = ""
     elif is_gaming_split:
         alignment = 5       # Middle-Center
@@ -326,11 +326,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             wrapped_text = r"\N".join(wrapped_lines) if wrapped_lines else clean_hook
 
-        # For cinema_blur: \pos(540,480) (directly above 16:9 box in upper blurred space)
+        # For cinema_blur: \pos(540,460) (directly above 16:9 box in upper blurred space)
         # For gaming_split: \pos(540,735) (top of gameplay zone)
         # For center_crop: \pos(540,260) (upper third safe zone)
         if is_cinema_blur:
-            banner_pos = r"\pos(540,480)"
+            banner_pos = r"\pos(540,460)"
         elif is_gaming_split:
             banner_pos = r"\pos(540,735)"
         else:

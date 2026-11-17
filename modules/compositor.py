@@ -10,15 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 import subprocess
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
-import numpy as np
 
 from config import (
     AUDIO_BITRATE,
@@ -396,7 +393,7 @@ def build_filtergraph(
         if use_dramatic_punch and climax_offset is not None:
             fg = (
                 f"[0:v]scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=increase,"
-                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},boxblur=25:5,eq=brightness=-0.22:contrast=0.9[bg];"
+                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},boxblur=25:5,eq=brightness=-0.22[bg];"
                 f"[0:v]scale={CANVAS_WIDTH}:-2:flags=lanczos,{ANTI_HAZE_FILTER},setsar=1[fg_base];"
                 f"[fg_base]split[fg_main][fg_zsrc];"
                 f"[fg_zsrc]crop=iw/1.12:ih/1.12:(iw-iw/1.12)/2:(ih-ih/1.12)/2,"
@@ -408,7 +405,7 @@ def build_filtergraph(
         else:
             fg = (
                 f"[0:v]scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=increase,"
-                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},boxblur=25:5,eq=brightness=-0.22:contrast=0.9[bg];"
+                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},boxblur=25:5,eq=brightness=-0.22[bg];"
                 f"[0:v]scale={CANVAS_WIDTH}:-2:flags=lanczos,{ANTI_HAZE_FILTER},setsar=1[fg];"
                 f"[bg][fg]overlay=0:(H-h)/2,setsar=1"
             )
@@ -419,221 +416,6 @@ def build_filtergraph(
 
     else:
         raise ValueError(f"Unsupported layout mode: {layout}")
-
-
-@dataclass
-class SceneSegment:
-    start_time: float
-    end_time: float
-    layout: LayoutMode  # LayoutMode.CENTER_CROP or LayoutMode.CINEMA_BLUR
-    speaker_x: float = 0.5
-
-
-def detect_scene_segments(
-    video_path: Path,
-    total_duration: float,
-    src_w: int,
-    src_h: int,
-    min_cut_distance: float = 1.5,
-    scene_threshold: float = 0.35,
-) -> List[SceneSegment]:
-    """
-    Runs a fast FFmpeg scene-cut detection pass on the trimmed clip to find exact scene cut timestamps.
-    Ignores cuts closer than min_cut_distance (1.5 seconds) apart.
-    For each sub-segment between scene cuts, samples 1 middle frame and classifies it as:
-    - Talking-Head Shot: OpenCV detects a prominent face in the center region (center_crop centered on speaker_x_norm).
-    - Wide Graphic / B-Roll Shot: No prominent centered face, or high visual/text edge density across outer thirds (cinema_blur).
-
-    Merges adjacent sub-segments with identical classification.
-    Returns:
-        List of SceneSegment objects.
-    """
-    video_path = Path(video_path).resolve()
-    if not video_path.exists() or total_duration <= 0.0:
-        return []
-
-    # 1. FFmpeg scene-cut detection pass
-    cmd = [
-        FFMPEG_BIN,
-        "-hide_banner",
-        "-i",
-        str(video_path),
-        "-filter_complex",
-        f"select='gt(scene,{scene_threshold})',showinfo",
-        "-f",
-        "null",
-        "-",
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    raw_cuts = [float(m.group(1)) for m in re.finditer(r"pts_time:([0-9.]+)", res.stderr)]
-
-    # Filter cuts closer than min_cut_distance apart and at least min_cut_distance from edges
-    filtered_cuts: List[float] = []
-    for t in raw_cuts:
-        if t < min_cut_distance or (total_duration - t) < min_cut_distance:
-            continue
-        if not filtered_cuts or (t - filtered_cuts[-1] >= min_cut_distance):
-            filtered_cuts.append(t)
-
-    if not filtered_cuts:
-        return []
-
-    raw_intervals: List[Tuple[float, float]] = []
-    prev_t = 0.0
-    for cut_t in filtered_cuts:
-        raw_intervals.append((prev_t, cut_t))
-        prev_t = cut_t
-    raw_intervals.append((prev_t, total_duration))
-
-    # 2. OpenCV Haar Cascade classifier for face detection
-    haarcascades_dir = getattr(getattr(cv2, "data", None), "haarcascades", None)
-    if haarcascades_dir:
-        cascade_file = Path(haarcascades_dir) / "haarcascade_frontalface_default.xml"
-    else:
-        cascade_file = Path(cv2.__file__).parent / "data" / "haarcascade_frontalface_default.xml"
-
-    cascade = cv2.CascadeClassifier(str(cascade_file)) if cascade_file.exists() else None
-
-    cap = cv2.VideoCapture(str(video_path))
-    classified: List[Tuple[float, float, LayoutMode, float]] = []
-
-    for s_start, s_end in raw_intervals:
-        mid_t = (s_start + s_end) / 2.0
-        frame = None
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_POS_MSEC, mid_t * 1000.0)
-            ret, read_frame = cap.read()
-            if ret and read_frame is not None:
-                frame = read_frame
-
-        if frame is None or cascade is None or cascade.empty():
-            classified.append((s_start, s_end, LayoutMode.CENTER_CROP, 0.5))
-            continue
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        min_face_dim = max(40, int(src_h * 0.06))
-        faces = cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(min_face_dim, min_face_dim),
-        )
-
-        edges = cv2.Canny(gray, 50, 150)
-        left_border = max(1, int(src_w * 0.30))
-        right_border = min(src_w - 1, int(src_w * 0.70))
-        left_third = edges[:, :left_border]
-        right_third = edges[:, right_border:]
-        outer_density = (np.count_nonzero(left_third) + np.count_nonzero(right_third)) / (
-            left_third.size + right_third.size
-        )
-
-        prominent_face = False
-        speaker_x = 0.5
-        for (fx, fy, fw, fh) in faces:
-            cx = (float(fx) + float(fw) / 2.0) / src_w
-            nw = float(fw) / src_w
-            if nw >= 0.08 and 0.20 <= cx <= 0.80:
-                prominent_face = True
-                speaker_x = round(cx, 4)
-                break
-
-        # Talking-head if prominent centered face and not overloaded with text/graphic edge density in outer thirds
-        if prominent_face and outer_density < 0.08:
-            classified.append((s_start, s_end, LayoutMode.CENTER_CROP, speaker_x))
-        else:
-            classified.append((s_start, s_end, LayoutMode.CINEMA_BLUR, 0.5))
-
-    cap.release()
-
-    # 3. Merge adjacent sub-segments with identical classification
-    merged: List[SceneSegment] = []
-    for s_start, s_end, s_mode, s_x in classified:
-        if merged and merged[-1].layout == s_mode:
-            if s_mode == LayoutMode.CINEMA_BLUR or abs(merged[-1].speaker_x - s_x) < 0.15:
-                prev = merged[-1]
-                prev.end_time = s_end
-                if s_mode == LayoutMode.CENTER_CROP:
-                    prev.speaker_x = round((prev.speaker_x + s_x) / 2.0, 4)
-                continue
-        merged.append(SceneSegment(start_time=s_start, end_time=s_end, layout=s_mode, speaker_x=s_x))
-
-    if len(merged) <= 1:
-        return merged
-
-    # If every segment has the exact same layout mode, simplify to 1 single segment covering full duration
-    first_mode = merged[0].layout
-    if all(s.layout == first_mode for s in merged):
-        avg_x = sum(s.speaker_x for s in merged) / len(merged)
-        return [SceneSegment(start_time=0.0, end_time=total_duration, layout=first_mode, speaker_x=avg_x)]
-
-    return merged
-
-
-def build_dynamic_filtergraph(
-    segments: List[SceneSegment],
-    src_w: int,
-    src_h: int,
-    ass_path: Optional[Path] = None,
-    climax_offset: Optional[float] = None,
-    use_dramatic_punch: bool = False,
-) -> str:
-    """
-    Constructs a multi-segment scene-aware FFmpeg filtergraph.
-    Normalizes every sub-segment to identical 1080x1920, 60fps, yuv420p stream parameters
-    before concatenating (concat=n=K:v=1:a=0).
-    Burns the .ass hook banner + karaoke captions and applies Director FX zoom-punch if enabled.
-    """
-    fg_parts: List[str] = []
-    k = len(segments)
-
-    for i, seg in enumerate(segments):
-        s_start = seg.start_time
-        s_end = seg.end_time
-        trim_filter = f"trim=start={s_start:.3f}:end={s_end:.3f},setpts=PTS-STARTPTS"
-
-        if seg.layout == LayoutMode.CENTER_CROP:
-            crop_expr = f"crop=ih*9/16:ih:min(max(0\\,iw*{seg.speaker_x:.4f}-(ih*9/16)/2)\\,iw-ih*9/16):0"
-            fg_parts.append(
-                f"[0:v]{trim_filter},{crop_expr},"
-                f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:flags=lanczos,"
-                f"{ANTI_HAZE_FILTER},fps=60,format=yuv420p,setsar=1[seg_{i}];"
-            )
-        else:  # LayoutMode.CINEMA_BLUR
-            fg_parts.append(
-                f"[0:v]{trim_filter},split[bg_in_{i}][fg_in_{i}];"
-                f"[bg_in_{i}]scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=increase,"
-                f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},boxblur=25:5,eq=brightness=-0.22:contrast=0.9[bg_{i}];"
-                f"[fg_in_{i}]scale={CANVAS_WIDTH}:-2:flags=lanczos,{ANTI_HAZE_FILTER},setsar=1[fg_{i}];"
-                f"[bg_{i}][fg_{i}]overlay=0:(H-h)/2,fps=60,format=yuv420p,setsar=1[seg_{i}];"
-            )
-
-    concat_inputs = "".join(f"[seg_{i}]" for i in range(k))
-
-    t_climax = max(0.0, float(climax_offset)) if climax_offset is not None else 0.0
-    t_flash_end = t_climax + 0.15
-    t_zoom_end = t_climax + 2.5
-
-    if use_dramatic_punch and climax_offset is not None:
-        fg_parts.append(f"{concat_inputs}concat=n={k}:v=1:a=0[v_cat];")
-        fg_parts.append(
-            f"[v_cat]split[v_main][v_zsrc];"
-            f"[v_zsrc]crop=iw/1.12:ih/1.12:(iw-iw/1.12)/2:(ih-ih/1.12)/2,"
-            f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:flags=lanczos[v_zoomed];"
-            f"[v_main][v_zoomed]overlay=0:0:enable='between(t,{t_climax:.3f},{t_zoom_end:.3f})',"
-            f"eq=brightness=0.18:enable='between(t,{t_climax:.3f},{t_flash_end:.3f})'"
-        )
-        if ass_path:
-            fg_parts.append(f",ass='{escape_ffmpeg_path(ass_path)}'[v]")
-        else:
-            fg_parts.append("[v]")
-    else:
-        if ass_path:
-            fg_parts.append(f"{concat_inputs}concat=n={k}:v=1:a=0,ass='{escape_ffmpeg_path(ass_path)}'[v]")
-        else:
-            fg_parts.append(f"{concat_inputs}concat=n={k}:v=1:a=0[v]")
-
-    return "".join(fg_parts)
 
 
 def detect_facecam(
@@ -879,47 +661,22 @@ def compose_clip(
     has_audio = probe_info.get("has_audio", False)
     total_duration = probe_info.get("duration", 0.0)
 
-    dynamic_segments: Optional[List[SceneSegment]] = None
-
-    # Universal AI Layout Router: Scene-Aware Dynamic Framing
+    # Universal AI Layout Router: 100% Predictable Single-Pass Routing
     if layout == LayoutMode.AUTO:
-        # 1. First check if video is a corner-webcam gaming stream
-        detected_cam, detected_speaker_x = detect_facecam(input_path, vod_key=vod_key)
-        if detected_cam is not None:
-            layout = LayoutMode.GAMING_SPLIT
-            cam_bbox = detected_cam
-            logger.info("Corner gaming webcam detected (%s); using gaming_split layout", cam_bbox)
-        else:
-            # 2. Scene-aware dynamic framing for video essays / educational / wide content
-            try:
-                logger.info("Running scene-aware dynamic framing detection on %s...", input_path.name)
-                dynamic_segments = detect_scene_segments(
-                    video_path=input_path,
-                    total_duration=total_duration,
-                    src_w=src_w,
-                    src_h=src_h,
-                )
-                if dynamic_segments and len(dynamic_segments) > 1:
-                    logger.info(
-                        "Scene-aware dynamic framing active: %d distinct sub-segments across %.1fs",
-                        len(dynamic_segments),
-                        total_duration,
-                    )
-                elif dynamic_segments and len(dynamic_segments) == 1:
-                    layout = dynamic_segments[0].layout
-                    speaker_x = dynamic_segments[0].speaker_x
-                    dynamic_segments = None
-                    logger.info("Uniform scene detected; running single-pass layout '%s' (speaker_x=%.2f)", layout.value, speaker_x)
-                else:
-                    layout = LayoutMode.CENTER_CROP
-                    speaker_x = detected_speaker_x
-                    dynamic_segments = None
-                    logger.info("No scene cuts detected; falling back to single-pass center_crop (speaker_x=%.2f)", speaker_x)
-            except Exception as exc:
-                logger.warning("Scene-aware dynamic framing failed (%s); falling back cleanly to center_crop", exc)
-                layout = LayoutMode.CENTER_CROP
-                speaker_x = detected_speaker_x
-                dynamic_segments = None
+        try:
+            from modules.brain import detect_webcam_gemini_vision
+
+            has_cam, cam_box = detect_webcam_gemini_vision(input_path, vod_key=vod_key)
+            if has_cam and cam_box is not None:
+                layout = LayoutMode.GAMING_SPLIT
+                cam_bbox = cam_box
+                logger.info("Gemini Vision detected corner webcam overlay (%s) -> gaming_split", cam_bbox)
+            else:
+                layout = LayoutMode.CINEMA_BLUR
+                logger.info("No corner webcam overlay detected -> defaulting to cinema_blur")
+        except Exception as exc:
+            logger.warning("Webcam vision check failed (%s); defaulting to cinema_blur", exc)
+            layout = LayoutMode.CINEMA_BLUR
 
     # Smart Auto-Webcam Detection & Fallback if gaming_split is requested with default cam_bbox
     if layout == LayoutMode.GAMING_SPLIT and auto_detect_cam and cam_bbox == DEFAULT_WEBCAM_BBOX:
@@ -943,27 +700,17 @@ def compose_clip(
         output_path = Path(output_path).resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build video filtergraph: multi-segment dynamic or single-pass
-    if dynamic_segments and len(dynamic_segments) > 1:
-        video_filtergraph = build_dynamic_filtergraph(
-            segments=dynamic_segments,
-            src_w=src_w,
-            src_h=src_h,
-            ass_path=ass_path,
-            climax_offset=climax_offset,
-            use_dramatic_punch=use_dramatic_punch,
-        )
-    else:
-        video_filtergraph = build_filtergraph(
-            layout=layout,
-            src_w=src_w,
-            src_h=src_h,
-            cam_bbox=cam_bbox,
-            speaker_x=speaker_x,
-            ass_path=ass_path,
-            climax_offset=climax_offset,
-            use_dramatic_punch=use_dramatic_punch,
-        )
+    # Build video filtergraph: single-pass with anti-haze Lanczos upscaling & optional Director FX
+    video_filtergraph = build_filtergraph(
+        layout=layout,
+        src_w=src_w,
+        src_h=src_h,
+        cam_bbox=cam_bbox,
+        speaker_x=speaker_x,
+        ass_path=ass_path,
+        climax_offset=climax_offset,
+        use_dramatic_punch=use_dramatic_punch,
+    )
 
     # Resolve BGM track if enabled
     effective_bgm: Optional[Path] = None

@@ -27,6 +27,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import BASE_DIR, DB_PATH, OUTPUTS_DIR
+from database import (
+    add_source,
+    delete_source,
+    get_latest_nightly_run,
+    get_source_by_id,
+    init_db,
+    list_nightly_runs,
+    list_sources,
+    resolve_youtube_channel,
+    update_source,
+)
 
 # Ensure necessary directories exist
 LOGS_DIR = BASE_DIR / "logs"
@@ -35,6 +46,7 @@ WEB_DIR = BASE_DIR / "web"
 WEB_DIR.mkdir(parents=True, exist_ok=True)
 TRASH_DIR = OUTPUTS_DIR / ".trash"
 TRASH_DIR.mkdir(parents=True, exist_ok=True)
+LOCK_FILE = BASE_DIR / "nightly.lock"
 
 
 # ============================================================================
@@ -42,10 +54,31 @@ TRASH_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================================
 
 def get_db() -> sqlite3.Connection:
-    """Returns a SQLite connection with Row factory and busy timeout."""
-    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+    """Returns a SQLite connection with Row factory, WAL mode, and busy timeout."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=10000;")
     return conn
+
+
+def get_nightly_lock_status() -> Tuple[bool, Optional[int]]:
+    """Checks if a batch run is actively in progress via nightly.lock."""
+    if not LOCK_FILE.exists():
+        return False, None
+    try:
+        content = LOCK_FILE.read_text(encoding="utf-8").strip()
+        if content.isdigit():
+            pid = int(content)
+            if pid > 0:
+                try:
+                    os.kill(pid, 0)
+                    return True, pid
+                except OSError:
+                    return False, None
+    except Exception:
+        pass
+    return False, None
 
 
 def sync_clip_metadata(conn: sqlite3.Connection) -> None:
@@ -82,12 +115,14 @@ def sync_clip_metadata(conn: sqlite3.Connection) -> None:
 
 def init_server_db() -> None:
     """
-    Safely migrates clipengine.db:
-    1. Adds missing review and tracking columns to 'clips'.
-    2. Backfills 'stream_folder' for existing clips.
-    3. Creates the 'jobs' table for background task tracking.
-    4. Resets any orphaned running jobs from previous sessions.
+    Safely initializes and migrates clipengine.db:
+    1. Calls database.init_db() for sources, processed VODs, and nightly runs.
+    2. Adds missing review and tracking columns to 'clips'.
+    3. Backfills 'stream_folder' for existing clips.
+    4. Creates the 'jobs' table for background task tracking.
+    5. Resets any orphaned running jobs from previous sessions.
     """
+    init_db(DB_PATH)
     with get_db() as conn:
         cur = conn.cursor()
 
@@ -102,6 +137,11 @@ def init_server_db() -> None:
             ("views", "ALTER TABLE clips ADD COLUMN views INTEGER DEFAULT 0"),
             ("stream_folder", "ALTER TABLE clips ADD COLUMN stream_folder TEXT"),
             ("notes", "ALTER TABLE clips ADD COLUMN notes TEXT"),
+            ("target_channel", "ALTER TABLE clips ADD COLUMN target_channel TEXT DEFAULT 'Wealth Signals'"),
+            ("upload_title", "ALTER TABLE clips ADD COLUMN upload_title TEXT"),
+            ("upload_description", "ALTER TABLE clips ADD COLUMN upload_description TEXT"),
+            ("pinned_comment", "ALTER TABLE clips ADD COLUMN pinned_comment TEXT"),
+            ("source_type", "ALTER TABLE clips ADD COLUMN source_type TEXT DEFAULT 'manual'"),
         ]
 
         for col_name, sql in column_migrations:
@@ -432,6 +472,45 @@ class ClipUpdateRequest(BaseModel):
     platform: Optional[str] = None
     views: Optional[int] = None
     notes: Optional[str] = None
+    target_channel: Optional[str] = None
+    upload_title: Optional[str] = None
+    upload_description: Optional[str] = None
+    pinned_comment: Optional[str] = None
+
+
+class SourceCreateRequest(BaseModel):
+    channel_name: str
+    youtube_channel_id: str
+    rss_url: Optional[str] = None
+    target_channel: str = "Wealth Signals"
+    layout: str = "cinema_blur"
+    director_prompt: Optional[str] = None
+    max_clips_per_vod: int = Field(default=2, ge=1, le=3)
+    min_score: float = Field(default=8.0, ge=1.0, le=10.0)
+    permission: str = "unconfirmed"
+    enabled: int = Field(default=0, ge=0, le=1)
+
+
+class SourceUpdateRequest(BaseModel):
+    channel_name: Optional[str] = None
+    youtube_channel_id: Optional[str] = None
+    rss_url: Optional[str] = None
+    target_channel: Optional[str] = None
+    layout: Optional[str] = None
+    director_prompt: Optional[str] = None
+    max_clips_per_vod: Optional[int] = None
+    min_score: Optional[float] = None
+    permission: Optional[str] = None
+    enabled: Optional[int] = None
+
+
+class SourceResolveRequest(BaseModel):
+    identifier: str
+
+
+class NightlyRunRequest(BaseModel):
+    dry_run: bool = False
+    max_clips: Optional[int] = None
 
 
 # ----------------------------------------------------------------------------
@@ -574,6 +653,7 @@ def list_clips_api(
                 SUM(CASE WHEN COALESCE(review_status, 'new') != 'trashed' THEN 1 ELSE 0 END) as active_clips,
                 SUM(CASE WHEN COALESCE(review_status, 'new') = 'approved' THEN 1 ELSE 0 END) as approved_count,
                 SUM(CASE WHEN COALESCE(review_status, 'new') = 'posted' THEN 1 ELSE 0 END) as posted_count,
+                SUM(CASE WHEN COALESCE(review_status, 'new') = 'low_score' THEN 1 ELSE 0 END) as low_score_count,
                 SUM(COALESCE(views, 0)) as total_views
             FROM clips
             """
@@ -609,7 +689,7 @@ def update_clip_api(clip_id: int, req: ClipUpdateRequest) -> Dict[str, Any]:
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
 
-    allowed_statuses = {"new", "approved", "rejected", "posted", "trashed"}
+    allowed_statuses = {"new", "approved", "rejected", "posted", "trashed", "low_score"}
     if req.review_status is not None and req.review_status not in allowed_statuses:
         raise HTTPException(
             status_code=400,
@@ -633,6 +713,18 @@ def update_clip_api(clip_id: int, req: ClipUpdateRequest) -> Dict[str, Any]:
     if req.notes is not None:
         updates.append("notes = ?")
         params.append(req.notes.strip())
+    if req.target_channel is not None:
+        updates.append("target_channel = ?")
+        params.append(req.target_channel.strip())
+    if req.upload_title is not None:
+        updates.append("upload_title = ?")
+        params.append(req.upload_title.strip())
+    if req.upload_description is not None:
+        updates.append("upload_description = ?")
+        params.append(req.upload_description.strip())
+    if req.pinned_comment is not None:
+        updates.append("pinned_comment = ?")
+        params.append(req.pinned_comment.strip())
 
     if updates:
         params.append(clip_id)
@@ -693,6 +785,124 @@ def open_clip_folder(clip_id: int) -> Dict[str, Any]:
     # /select,<path> opens Explorer with the specific file selected
     subprocess.Popen(f'explorer.exe /select,"{norm_path}"')
     return {"status": "ok", "path": norm_path}
+
+
+# ----------------------------------------------------------------------------
+# Overnight Batch Pipeline & Sources Endpoints
+# ----------------------------------------------------------------------------
+
+@app.get("/api/nightly/status")
+def get_nightly_status() -> Dict[str, Any]:
+    is_running, pid = get_nightly_lock_status()
+    latest_run = get_latest_nightly_run(DB_PATH)
+    runs = list_nightly_runs(limit=10, db_path=DB_PATH)
+    return {
+        "is_running": is_running,
+        "running_pid": pid,
+        "latest_run": latest_run,
+        "recent_runs": runs,
+    }
+
+
+@app.post("/api/nightly/run")
+def trigger_nightly_run(dry_run: bool = False, max_clips: Optional[int] = None) -> Dict[str, Any]:
+    is_running, pid = get_nightly_lock_status()
+    if is_running:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A batch run is already actively running (PID {pid}).",
+        )
+
+    cmd = [sys.executable, "-u", str(BASE_DIR / "nightly.py")]
+    if dry_run:
+        cmd.append("--dry-run")
+    if max_clips is not None and max_clips > 0:
+        cmd.extend(["--max-clips", str(max_clips)])
+
+    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(BASE_DIR),
+        creationflags=creation_flags,
+    )
+
+    return {
+        "status": "started",
+        "pid": proc.pid,
+        "dry_run": dry_run,
+        "max_clips": max_clips,
+        "message": f"Nightly batch started (PID {proc.pid})",
+    }
+
+
+@app.get("/api/sources")
+def list_sources_api() -> Dict[str, Any]:
+    sources = list_sources(DB_PATH)
+    return {"sources": sources}
+
+
+@app.post("/api/sources")
+def create_source_api(req: SourceCreateRequest) -> Dict[str, Any]:
+    source_id = add_source(
+        channel_name=req.channel_name.strip(),
+        youtube_channel_id=req.youtube_channel_id.strip(),
+        rss_url=req.rss_url.strip() if req.rss_url else None,
+        target_channel=req.target_channel.strip() if req.target_channel else "Wealth Signals",
+        layout=req.layout.strip() if req.layout else "cinema_blur",
+        director_prompt=req.director_prompt.strip() if req.director_prompt else None,
+        max_clips_per_vod=req.max_clips_per_vod,
+        min_score=req.min_score,
+        permission=req.permission,
+        enabled=req.enabled,
+        db_path=DB_PATH,
+    )
+    created = get_source_by_id(source_id, DB_PATH)
+    return {"source": created}
+
+
+@app.patch("/api/sources/{source_id}")
+def update_source_api(source_id: int, req: SourceUpdateRequest) -> Dict[str, Any]:
+    existing = get_source_by_id(source_id, DB_PATH)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Source channel not found")
+
+    update_source(
+        source_id=source_id,
+        channel_name=req.channel_name.strip() if req.channel_name is not None else None,
+        youtube_channel_id=req.youtube_channel_id.strip() if req.youtube_channel_id is not None else None,
+        rss_url=req.rss_url.strip() if req.rss_url is not None else None,
+        target_channel=req.target_channel.strip() if req.target_channel is not None else None,
+        layout=req.layout.strip() if req.layout is not None else None,
+        director_prompt=req.director_prompt.strip() if req.director_prompt is not None else None,
+        max_clips_per_vod=req.max_clips_per_vod,
+        min_score=req.min_score,
+        permission=req.permission,
+        enabled=req.enabled,
+        db_path=DB_PATH,
+    )
+    updated = get_source_by_id(source_id, DB_PATH)
+    return {"source": updated}
+
+
+@app.delete("/api/sources/{source_id}")
+def delete_source_api(source_id: int) -> Dict[str, Any]:
+    existing = get_source_by_id(source_id, DB_PATH)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Source channel not found")
+    delete_source(source_id, DB_PATH)
+    return {"status": "ok", "message": f"Source {source_id} deleted"}
+
+
+@app.post("/api/sources/resolve")
+def resolve_source_api(req: SourceResolveRequest) -> Dict[str, Any]:
+    cid, name, rss = resolve_youtube_channel(req.identifier)
+    if not cid:
+        raise HTTPException(status_code=400, detail="Could not resolve YouTube channel from identifier.")
+    return {
+        "youtube_channel_id": cid,
+        "channel_name": name,
+        "rss_url": rss,
+    }
 
 
 # ----------------------------------------------------------------------------

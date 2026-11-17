@@ -80,8 +80,19 @@
         </div>
       </div>
 
-      <!-- Refresh Button -->
-      <div class="flex items-center space-x-3">
+      <!-- Sources Manager & Refresh Buttons -->
+      <div class="flex items-center space-x-2">
+        <button
+          @click="openSourcesModal()"
+          class="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors border border-zinc-700 text-xs font-semibold flex items-center space-x-1.5"
+          title="Manage creator source channels"
+        >
+          <svg class="w-4 h-4 text-brand-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+          </svg>
+          <span>Sources</span>
+        </button>
+
         <button @click="loadData()" class="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors border border-zinc-700" title="Refresh library">
           <svg class="w-5 h-5" :class="{'animate-spin': isRefreshing}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
@@ -93,6 +104,98 @@
 
   <!-- Main Studio Workspace -->
   <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+    <!-- Banner: Overnight Batch Scout Run -->
+    <section class="bg-gradient-to-r from-zinc-900 via-zinc-900 to-brand-950/30 border border-zinc-800 rounded-2xl p-5 shadow-xl relative overflow-hidden">
+      <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        
+        <!-- Left: Status & Metrics -->
+        <div class="space-y-2">
+          <div class="flex items-center space-x-3">
+            <div class="w-8 h-8 rounded-lg bg-brand-600/20 text-brand-400 border border-brand-500/30 flex items-center justify-center font-bold">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="flex items-center space-x-2">
+                <h3 class="text-sm font-bold text-white">Overnight Source Scout & Batch Pipeline</h3>
+                <template x-if="nightly.is_running">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                    <span class="w-2 h-2 mr-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                    Running Batch (PID <span x-text="nightly.running_pid"></span>)
+                  </span>
+                </template>
+                <template x-if="!nightly.is_running && nightly.latest_run">
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider border"
+                    :class="{
+                      'bg-emerald-500/10 text-emerald-400 border-emerald-500/30': nightly.latest_run.status === 'completed',
+                      'bg-blue-500/10 text-blue-400 border-blue-500/30': nightly.latest_run.status === 'dry_run',
+                      'bg-amber-500/10 text-amber-400 border-amber-500/30': nightly.latest_run.status === 'cutoff',
+                      'bg-rose-500/10 text-rose-400 border-rose-500/30': nightly.latest_run.status === 'failed',
+                      'bg-zinc-800 text-zinc-400 border-zinc-700': nightly.latest_run.status === 'no_sources'
+                    }"
+                    x-text="'Last: ' + nightly.latest_run.status"
+                  ></span>
+                </template>
+              </div>
+              <p class="text-xs text-zinc-400">Permission-gated automated channel scout • 3:00 AM hard watchdog • AI upload pack generator</p>
+            </div>
+          </div>
+
+          <!-- Quick Metrics of Last Run -->
+          <template x-if="nightly.latest_run">
+            <div class="flex flex-wrap items-center gap-4 text-xs text-zinc-400 pt-1">
+              <div>Started: <span class="text-zinc-200 font-medium" x-text="formatDate(nightly.latest_run.started_at)"></span></div>
+              <div class="h-3 w-px bg-zinc-800"></div>
+              <div>VODs Checked: <span class="text-zinc-200 font-medium" x-text="nightly.latest_run.vods_checked || 0"></span></div>
+              <div class="h-3 w-px bg-zinc-800"></div>
+              <div>Clips Created: <span class="text-emerald-400 font-bold" x-text="nightly.latest_run.clips_created || 0"></span></div>
+              <div class="h-3 w-px bg-zinc-800"></div>
+              <div>Failures: <span class="text-rose-400 font-medium" x-text="nightly.latest_run.failures || 0"></span></div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Right: Action Buttons -->
+        <div class="flex flex-wrap items-center gap-2.5">
+          <button
+            @click="triggerNightly(true)"
+            :disabled="nightly.is_running"
+            class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-200 border border-zinc-700 transition-colors flex items-center space-x-1.5"
+            title="Preview candidate RSS feeds and filtering without rendering video"
+          >
+            <svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+            </svg>
+            <span>Dry Run Scout</span>
+          </button>
+
+          <button
+            @click="triggerNightly(false, 2)"
+            :disabled="nightly.is_running"
+            class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-brand-600 hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-lg shadow-brand-500/20 transition-colors flex items-center space-x-1.5"
+            title="Immediately launch overnight pipeline for confirmed sources (capped at 2 clips)"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span>Run Source Batch (Max 2 Clips)</span>
+          </button>
+
+          <button
+            @click="openSourcesModal()"
+            class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700 transition-colors flex items-center space-x-1.5"
+          >
+            <span>Manage Sources</span>
+          </button>
+        </div>
+
+      </div>
+    </section>
 
     <!-- Section 1: Job Creation Bar / Launchpad -->
     <section class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
@@ -427,11 +530,27 @@
             Posted
           </button>
           <button
+            @click="filters.status = 'low_score'"
+            :class="filters.status === 'low_score' ? 'bg-amber-600 text-white font-bold shadow' : 'text-zinc-400 hover:text-white bg-zinc-800'"
+            class="px-3 py-1.5 rounded-lg text-xs transition-colors flex items-center space-x-1.5"
+            title="Clips below min_score kept for Week-1 view calibration"
+          >
+            <span>Low Score</span>
+            <span class="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-950/80 text-amber-300 border border-amber-800/60" x-text="stats.low_score_count || 0"></span>
+          </button>
+          <button
             @click="filters.status = 'rejected'"
             :class="filters.status === 'rejected' ? 'bg-zinc-600 text-white font-bold' : 'text-zinc-400 hover:text-white bg-zinc-800'"
             class="px-3 py-1.5 rounded-lg text-xs transition-colors"
           >
             Rejected
+          </button>
+          <button
+            @click="filters.status = 'trashed'"
+            :class="filters.status === 'trashed' ? 'bg-rose-900 text-rose-200 font-bold' : 'text-zinc-400 hover:text-white bg-zinc-800'"
+            class="px-3 py-1.5 rounded-lg text-xs transition-colors"
+          >
+            Trashed
           </button>
         </div>
 
@@ -533,8 +652,16 @@
                 <div class="p-4 space-y-3 flex-1 flex flex-col justify-between">
                   <div class="space-y-3">
                     <!-- Vibe & Duration Tags -->
-                    <div class="flex items-center justify-between text-[11px] text-zinc-400">
-                      <span class="px-2 py-0.5 rounded bg-zinc-800 font-medium text-zinc-300" x-text="clip.vibe || 'viral_short'"></span>
+                    <div class="flex flex-wrap items-center justify-between gap-1 text-[11px] text-zinc-400">
+                      <div class="flex items-center space-x-1">
+                        <span class="px-1.5 py-0.5 rounded bg-zinc-800 font-medium text-zinc-300" x-text="clip.vibe || 'viral_short'"></span>
+                        <template x-if="clip.target_channel">
+                          <span class="px-1.5 py-0.5 rounded bg-brand-950/80 text-brand-300 border border-brand-800/40 text-[10px]" x-text="clip.target_channel"></span>
+                        </template>
+                        <template x-if="clip.review_status === 'low_score'">
+                          <span class="px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60 text-[10px] font-bold">Calibration</span>
+                        </template>
+                      </div>
                       <span class="font-mono text-zinc-500" x-text="clip.duration ? clip.duration + 's' : ''"></span>
                     </div>
 
@@ -552,33 +679,70 @@
                       </button>
                     </div>
 
-                    <!-- Direct-to-Upload Publishing Kit -->
-                    <div class="bg-zinc-950/70 border border-zinc-800/80 rounded-xl p-2.5 space-y-2">
-                      <div class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
-                        <span class="flex items-center space-x-1">
-                          <span>🚀</span>
-                          <span>Publishing Kit</span>
+                    <!-- Resilient Upload Pack & 1-Click Copy Drawer -->
+                    <div class="bg-zinc-950/90 border border-brand-900/40 rounded-xl p-2.5 space-y-2">
+                      <div class="text-[10px] font-bold text-zinc-300 uppercase tracking-wider flex items-center justify-between">
+                        <span class="flex items-center space-x-1.5 text-brand-300">
+                          <span>📦</span>
+                          <span>Upload Pack</span>
                         </span>
-                        <span class="text-[9px] text-zinc-500 font-normal">Ready to post</span>
+                        <button
+                          @click="copyCompleteUploadPack(clip)"
+                          class="text-[10px] text-brand-400 hover:text-brand-200 font-semibold px-2 py-0.5 rounded bg-brand-950/80 hover:bg-brand-900/60 border border-brand-800/50 transition-colors"
+                          title="Copy title, description, and comment at once"
+                        >
+                          Copy All
+                        </button>
                       </div>
 
-                      <!-- Action Row: Copy Caption + Download MP4 -->
-                      <div class="grid grid-cols-2 gap-1.5">
-                        <button
-                          @click="copyUploadCaption(clip)"
-                          class="w-full bg-brand-600/20 hover:bg-brand-600/30 text-brand-300 border border-brand-500/30 text-[11px] font-semibold py-1.5 px-2 rounded-lg flex items-center justify-center space-x-1 transition-colors"
-                          title="Copy title + #shorts #viral #trending"
-                        >
-                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-                          </svg>
-                          <span>Caption</span>
-                        </button>
+                      <!-- 1-Click Copy Title -->
+                      <div class="space-y-0.5">
+                        <div class="flex items-center justify-between text-[10px] text-zinc-400">
+                          <span class="font-medium">Title (&lt;60c + #shorts)</span>
+                          <button
+                            @click="copyUploadTitle(clip)"
+                            class="text-brand-400 hover:text-brand-200 font-semibold transition-colors text-[10px]"
+                          >
+                            <span x-text="copiedKey === (clip.id + '_title') ? '✓ Copied' : 'Copy'"></span>
+                          </button>
+                        </div>
+                        <div class="bg-zinc-900 px-2 py-1 rounded border border-zinc-800 text-[11px] text-zinc-200 font-medium truncate" x-text="clip.upload_title || (clip.hook_title + ' #shorts')"></div>
+                      </div>
 
+                      <!-- 1-Click Copy Description -->
+                      <div class="space-y-0.5">
+                        <div class="flex items-center justify-between text-[10px] text-zinc-400">
+                          <span class="font-medium">Description (Summary + Credit + Tags)</span>
+                          <button
+                            @click="copyUploadDescription(clip)"
+                            class="text-brand-400 hover:text-brand-200 font-semibold transition-colors text-[10px]"
+                          >
+                            <span x-text="copiedKey === (clip.id + '_desc') ? '✓ Copied' : 'Copy'"></span>
+                          </button>
+                        </div>
+                        <div class="bg-zinc-900 px-2 py-1 rounded border border-zinc-800 text-[11px] text-zinc-300 max-h-14 overflow-y-auto leading-relaxed whitespace-pre-line" x-text="clip.upload_description || 'A key insight from the full video. #shorts #viral #insights'"></div>
+                      </div>
+
+                      <!-- 1-Click Copy Pinned Comment -->
+                      <div class="space-y-0.5">
+                        <div class="flex items-center justify-between text-[10px] text-zinc-400">
+                          <span class="font-medium">Pinned Comment (Discussion Question)</span>
+                          <button
+                            @click="copyPinnedComment(clip)"
+                            class="text-brand-400 hover:text-brand-200 font-semibold transition-colors text-[10px]"
+                          >
+                            <span x-text="copiedKey === (clip.id + '_comment') ? '✓ Copied' : 'Copy'"></span>
+                          </button>
+                        </div>
+                        <div class="bg-zinc-900 px-2 py-1 rounded border border-zinc-800 text-[11px] text-zinc-300 italic truncate" x-text="clip.pinned_comment || 'What was your biggest takeaway from this clip?'"></div>
+                      </div>
+
+                      <!-- Action Row: Download MP4 & Platforms -->
+                      <div class="pt-1 border-t border-zinc-800/80 flex items-center gap-1.5">
                         <a
                           :href="clip.video_url"
-                          :download="(clip.hook_title || 'clip') + '.mp4'"
-                          class="w-full bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold py-1.5 px-2 rounded-lg flex items-center justify-center space-x-1 transition-colors text-center"
+                          :download="(clip.upload_title || clip.hook_title || 'clip') + '.mp4'"
+                          class="flex-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold py-1.5 px-2 rounded-lg flex items-center justify-center space-x-1 transition-colors text-center"
                           title="Download rendered MP4"
                         >
                           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -586,15 +750,12 @@
                           </svg>
                           <span>Download</span>
                         </a>
-                      </div>
 
-                      <!-- Quick-Launch Platform Badges -->
-                      <div class="flex items-center justify-between gap-1 pt-0.5">
                         <a
                           href="https://studio.youtube.com/channel/UC/videos/upload?d=ud"
                           target="_blank"
                           rel="noopener noreferrer"
-                          class="flex-1 bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/40 text-[10px] font-medium py-1 rounded text-center transition-colors"
+                          class="bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-800/40 text-[10px] font-medium py-1.5 px-2.5 rounded-lg text-center transition-colors"
                           title="Open YouTube Shorts upload"
                         >
                           YT Shorts
@@ -603,19 +764,10 @@
                           href="https://www.tiktok.com/creator-center/upload?from=webapp"
                           target="_blank"
                           rel="noopener noreferrer"
-                          class="flex-1 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-300 border border-cyan-800/40 text-[10px] font-medium py-1 rounded text-center transition-colors"
+                          class="bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-300 border border-cyan-800/40 text-[10px] font-medium py-1.5 px-2.5 rounded-lg text-center transition-colors"
                           title="Open TikTok creator upload"
                         >
                           TikTok
-                        </a>
-                        <a
-                          href="https://www.instagram.com/"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          class="flex-1 bg-pink-950/40 hover:bg-pink-900/50 text-pink-300 border border-pink-800/40 text-[10px] font-medium py-1 rounded text-center transition-colors"
-                          title="Open Instagram upload"
-                        >
-                          Reels
                         </a>
                       </div>
                     </div>
@@ -623,7 +775,7 @@
 
                   <!-- Review Status Action Pills -->
                   <div class="space-y-2">
-                    <div class="grid grid-cols-4 gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-[11px] font-medium text-center">
+                    <div class="grid grid-cols-5 gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-[10px] font-medium text-center">
                       <button
                         @click="updateStatus(clip.id, 'new')"
                         :class="clip.review_status === 'new' ? 'bg-zinc-700 text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'"
@@ -639,6 +791,18 @@
                         :class="clip.review_status === 'posted' ? 'bg-blue-600 text-white font-bold shadow' : 'text-zinc-400 hover:text-blue-400'"
                         class="py-1 rounded transition-colors"
                       >Post</button>
+                      <button
+                        @click="updateStatus(clip.id, 'low_score')"
+                        :class="clip.review_status === 'low_score' ? 'bg-amber-600 text-white font-bold shadow' : 'text-zinc-400 hover:text-amber-400'"
+                        class="py-1 rounded transition-colors"
+                        title="Low score calibration"
+                      >Low</button>
+                      <button
+                        @click="updateStatus(clip.id, 'rejected')"
+                        :class="clip.review_status === 'rejected' ? 'bg-rose-900/80 text-rose-200 font-bold' : 'text-zinc-400 hover:text-rose-400'"
+                        class="py-1 rounded transition-colors"
+                      >Rej</button>
+                    </div>
                       <button
                         @click="updateStatus(clip.id, 'rejected')"
                         :class="clip.review_status === 'rejected' ? 'bg-rose-900/80 text-rose-200 font-bold' : 'text-zinc-400 hover:text-rose-400'"
@@ -798,6 +962,263 @@
     </div>
   </div>
 
+  <!-- Sources Manager Modal (Permission-First Source Gating) -->
+  <div
+    x-show="sourcesModal.open"
+    x-transition.opacity
+    class="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
+    @keydown.escape.window="sourcesModal.open = false"
+    x-cloak
+  >
+    <div
+      class="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden"
+      @click.away="sourcesModal.open = false"
+    >
+      <!-- Modal Header -->
+      <div class="p-5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
+        <div class="flex items-center space-x-3">
+          <div class="w-9 h-9 rounded-xl bg-brand-600/20 text-brand-400 border border-brand-500/30 flex items-center justify-center font-bold">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+            </svg>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-white">Creator Source Channels Manager</h3>
+            <p class="text-xs text-zinc-400">Permission-First Safety Gating: Automated overnight runs strictly skip unconfirmed channels.</p>
+          </div>
+        </div>
+        <button
+          @click="sourcesModal.open = false"
+          class="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Modal Body (Scrollable) -->
+      <div class="p-6 overflow-y-auto space-y-6 flex-1">
+        
+        <!-- Section: Add New Source via Auto-Resolve -->
+        <div class="bg-zinc-950 border border-zinc-800 rounded-xl p-4 space-y-4">
+          <div class="flex items-center justify-between">
+            <h4 class="text-xs font-bold text-zinc-200 uppercase tracking-wider flex items-center space-x-1.5">
+              <span>➕</span>
+              <span>Add Source Channel</span>
+            </h4>
+            <span class="text-[11px] text-zinc-500">Auto-resolves @handle, custom URL, or UC... ID</span>
+          </div>
+
+          <div class="flex gap-2">
+            <input
+              type="text"
+              x-model="sourcesModal.resolveInput"
+              placeholder="e.g. @aliabdaal or https://www.youtube.com/@ChrisWilliamson"
+              @keydown.enter.prevent="resolveSource()"
+              class="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-brand-500"
+            />
+            <button
+              type="button"
+              @click="resolveSource()"
+              :disabled="sourcesModal.isResolving || !sourcesModal.resolveInput.trim()"
+              class="px-4 py-2 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-colors"
+            >
+              <svg x-show="sourcesModal.isResolving" class="animate-spin w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+              </svg>
+              <span>Auto-Resolve</span>
+            </button>
+          </div>
+
+          <template x-if="sourcesModal.resolveError">
+            <p class="text-xs text-rose-400" x-text="sourcesModal.resolveError"></p>
+          </template>
+
+          <!-- Resolved/Manual Form Fields -->
+          <form @submit.prevent="saveNewSource()" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-1 border-t border-zinc-800/80">
+            <div>
+              <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Creator Name</label>
+              <input type="text" required x-model="newSourceForm.channel_name" placeholder="Channel Name" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"/>
+            </div>
+            <div>
+              <label class="block text-[10px] font-semibold text-zinc-400 mb-1">YouTube Channel ID (UC...)</label>
+              <input type="text" required x-model="newSourceForm.youtube_channel_id" placeholder="UC..." class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white font-mono"/>
+            </div>
+            <div>
+              <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Target Publishing Channel</label>
+              <input type="text" required x-model="newSourceForm.target_channel" placeholder="Wealth Signals" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"/>
+            </div>
+            <div>
+              <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Layout Mode</label>
+              <select x-model="newSourceForm.layout" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white">
+                <option value="cinema_blur">Cinema Blur (Slides/Wide)</option>
+                <option value="gaming_split">Gaming Split (Webcam + Content)</option>
+                <option value="center_crop">Center Crop (9:16)</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Max Clips per VOD (1-3)</label>
+              <select x-model.number="newSourceForm.max_clips_per_vod" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white">
+                <option :value="1">1 Clip</option>
+                <option :value="2">2 Clips (Default)</option>
+                <option :value="3">3 Clips (Max)</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Min Virality Score (1-10)</label>
+              <input type="number" step="0.5" min="1" max="10" x-model.number="newSourceForm.min_score" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"/>
+            </div>
+            <div class="lg:col-span-3">
+              <label class="block text-[10px] font-semibold text-zinc-400 mb-1">AI Director Prompt Directive (Optional)</label>
+              <input type="text" x-model="newSourceForm.director_prompt" placeholder="e.g. Focus on life advice, mental models, frameworks" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"/>
+            </div>
+
+            <!-- Permission & Enabled Controls -->
+            <div class="lg:col-span-2 flex items-center space-x-6 pt-2">
+              <div>
+                <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Permission Rights Status</label>
+                <select
+                  x-model="newSourceForm.permission"
+                  @change="if (newSourceForm.permission !== 'confirmed') newSourceForm.enabled = 0"
+                  class="bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs font-semibold"
+                  :class="newSourceForm.permission === 'confirmed' ? 'text-emerald-400 border-emerald-600' : 'text-amber-400 border-amber-700'"
+                >
+                  <option value="unconfirmed">⚠️ Unconfirmed (Safe Default)</option>
+                  <option value="confirmed">✓ Confirmed (Explicit Right)</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Automated Overnight Scraping</label>
+                <label class="inline-flex items-center space-x-2 cursor-pointer" :class="{'opacity-50 cursor-not-allowed': newSourceForm.permission !== 'confirmed'}">
+                  <input
+                    type="checkbox"
+                    :disabled="newSourceForm.permission !== 'confirmed'"
+                    x-model="newSourceForm.enabled"
+                    :checked="newSourceForm.enabled === 1"
+                    @change="newSourceForm.enabled = $event.target.checked ? 1 : 0"
+                    class="rounded bg-zinc-800 border-zinc-700 text-brand-600 focus:ring-0"
+                  />
+                  <span class="text-xs text-zinc-300">Enable in Nightly Batch</span>
+                </label>
+                <p x-show="newSourceForm.permission !== 'confirmed'" class="text-[10px] text-zinc-500">Must set Permission to Confirmed before enabling.</p>
+              </div>
+            </div>
+
+            <div class="lg:col-span-1 flex items-end justify-end pt-2">
+              <button
+                type="submit"
+                :disabled="sourcesModal.isSaving"
+                class="w-full py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors shadow"
+              >
+                Save Source Channel
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Section: Configured Channels Table -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h4 class="text-xs font-bold text-zinc-200 uppercase tracking-wider flex items-center space-x-1.5">
+              <span>📋</span>
+              <span>Configured Channels (<span x-text="sourcesModal.list.length"></span>)</span>
+            </h4>
+            <span class="text-[11px] text-zinc-500">Only enabled channels with confirmed permission are batch-clipped</span>
+          </div>
+
+          <div class="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+            <table class="w-full text-left text-xs text-zinc-300">
+              <thead class="bg-zinc-900 border-b border-zinc-800 text-[10px] font-semibold uppercase text-zinc-400">
+                <tr>
+                  <th class="py-2.5 px-3">Channel / Creator</th>
+                  <th class="py-2.5 px-3">Target</th>
+                  <th class="py-2.5 px-3">Layout</th>
+                  <th class="py-2.5 px-3 text-center">Clips/VOD</th>
+                  <th class="py-2.5 px-3 text-center">Min Score</th>
+                  <th class="py-2.5 px-3 text-center">Permission Rights</th>
+                  <th class="py-2.5 px-3 text-center">Nightly Active</th>
+                  <th class="py-2.5 px-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-zinc-800/80">
+                <template x-for="s in sourcesModal.list" :key="s.id">
+                  <tr class="hover:bg-zinc-900/50 transition-colors">
+                    <td class="py-3 px-3">
+                      <div class="font-bold text-white text-xs" x-text="s.channel_name"></div>
+                      <div class="font-mono text-[10px] text-zinc-500 truncate max-w-[180px]" x-text="s.youtube_channel_id"></div>
+                    </td>
+                    <td class="py-3 px-3">
+                      <span class="text-brand-300 font-medium" x-text="s.target_channel || 'Wealth Signals'"></span>
+                    </td>
+                    <td class="py-3 px-3 font-mono text-[11px] text-zinc-400" x-text="s.layout || 'cinema_blur'"></td>
+                    <td class="py-3 px-3 text-center font-bold text-zinc-200" x-text="s.max_clips_per_vod || 2"></td>
+                    <td class="py-3 px-3 text-center font-bold text-amber-400" x-text="s.min_score || 8.0"></td>
+
+                    <!-- Permission Rights Column -->
+                    <td class="py-3 px-3 text-center">
+                      <button
+                        @click="toggleSourcePermission(s)"
+                        class="px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-colors"
+                        :class="s.permission === 'confirmed' ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/60' : 'bg-rose-950/80 text-rose-300 border-rose-700/60'"
+                        :title="s.permission === 'confirmed' ? 'Permission is confirmed. Click to revoke.' : 'Permission is unconfirmed. Click to confirm.'"
+                      >
+                        <span x-text="s.permission === 'confirmed' ? '✓ Confirmed' : '⚠️ Unconfirmed'"></span>
+                      </button>
+                    </td>
+
+                    <!-- Nightly Enabled Toggle -->
+                    <td class="py-3 px-3 text-center">
+                      <button
+                        @click="toggleSourceEnabled(s)"
+                        class="px-2.5 py-1 rounded-md text-[10px] font-bold transition-all"
+                        :class="{
+                          'bg-emerald-600 text-white shadow': s.enabled === 1 && s.permission === 'confirmed',
+                          'bg-zinc-800 text-zinc-400 hover:text-zinc-200': s.enabled === 0 && s.permission === 'confirmed',
+                          'opacity-40 cursor-not-allowed bg-zinc-900 text-zinc-600': s.permission !== 'confirmed'
+                        }"
+                        :title="s.permission !== 'confirmed' ? 'Cannot enable without confirmed permission' : (s.enabled === 1 ? 'Active in nightly run. Click to disable.' : 'Disabled. Click to enable.')"
+                      >
+                        <span x-text="s.enabled === 1 ? 'ON' : 'OFF'"></span>
+                      </button>
+                    </td>
+
+                    <!-- Actions Column -->
+                    <td class="py-3 px-3 text-right">
+                      <button
+                        @click="deleteSource(s.id)"
+                        class="text-zinc-500 hover:text-rose-400 transition-colors p-1"
+                        title="Delete source channel"
+                      >
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                        </svg>
+                      </button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="p-4 border-t border-zinc-800 bg-zinc-950/60 flex items-center justify-between text-xs text-zinc-500">
+        <div>Pre-seeded placeholder channels (Chris Williamson & Ali Abdaal) are safe defaults until you confirm rights.</div>
+        <button
+          @click="sourcesModal.open = false"
+          class="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg font-semibold transition-colors"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Studio App Script -->
   <script>
     function studioApp() {
@@ -821,6 +1242,33 @@
           open: false,
           clip: null,
         },
+        sourcesModal: {
+          open: false,
+          list: [],
+          isSaving: false,
+          resolveInput: '',
+          isResolving: false,
+          resolveError: '',
+        },
+        newSourceForm: {
+          channel_name: '',
+          youtube_channel_id: '',
+          rss_url: '',
+          target_channel: 'Wealth Signals',
+          layout: 'cinema_blur',
+          director_prompt: '',
+          max_clips_per_vod: 2,
+          min_score: 8.0,
+          permission: 'unconfirmed',
+          enabled: 0,
+        },
+        nightly: {
+          is_running: false,
+          running_pid: null,
+          latest_run: null,
+          recent_runs: [],
+        },
+        copiedKey: null,
         showJobHistory: false,
         jobsList: [],
         completedResetTimer: null,
@@ -874,7 +1322,7 @@
         async loadData() {
           this.isRefreshing = true;
           try {
-            await Promise.all([this.fetchJobs(), this.fetchClips()]);
+            await Promise.all([this.fetchJobs(), this.fetchClips(), this.fetchNightlyStatus()]);
           } catch (e) {
             console.error('Error loading data:', e);
           } finally {
@@ -932,7 +1380,7 @@
           if (this.pollTimer) clearInterval(this.pollTimer);
           this.pollTimer = setInterval(async () => {
             const prevStatus = this.activeJob ? this.activeJob.status : null;
-            await this.fetchJobs();
+            await Promise.all([this.fetchJobs(), this.fetchNightlyStatus()]);
             const currStatus = this.activeJob ? this.activeJob.status : null;
 
             // Auto-trigger loadClips() when a job transitions into completed
@@ -1129,6 +1577,209 @@
           if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
           if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
           return String(num);
+        },
+
+        async fetchNightlyStatus() {
+          try {
+            const res = await fetch('/api/nightly/status');
+            if (res.ok) {
+              this.nightly = await res.json();
+            }
+          } catch (e) {
+            console.error('Error fetching nightly status:', e);
+          }
+        },
+
+        async triggerNightly(dryRun = false, maxClips = null) {
+          const actionName = dryRun ? 'Dry Run Scout' : 'Overnight Batch (Max 2 Clips)';
+          if (!confirm(`Launch ${actionName} now?`)) return;
+          try {
+            let url = '/api/nightly/run?dry_run=' + (dryRun ? 'true' : 'false');
+            if (maxClips) url += '&max_clips=' + maxClips;
+            const res = await fetch(url, { method: 'POST' });
+            if (res.ok) {
+              const data = await res.json();
+              this.showToast(`Batch run launched (PID ${data.pid})!`);
+              await this.fetchNightlyStatus();
+            } else {
+              const err = await res.json();
+              alert(err.detail || 'Failed to trigger batch run');
+            }
+          } catch (e) {
+            alert('Failed to connect to ClipEngine server.');
+          }
+        },
+
+        openSourcesModal() {
+          this.sourcesModal.open = true;
+          this.fetchSources();
+        },
+
+        async fetchSources() {
+          try {
+            const res = await fetch('/api/sources');
+            if (res.ok) {
+              const data = await res.json();
+              this.sourcesModal.list = data.sources || [];
+            }
+          } catch (e) {
+            console.error('Error fetching sources:', e);
+          }
+        },
+
+        async resolveSource() {
+          const raw = this.sourcesModal.resolveInput.trim();
+          if (!raw) return;
+          this.sourcesModal.isResolving = true;
+          this.sourcesModal.resolveError = '';
+          try {
+            const res = await fetch('/api/sources/resolve', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ identifier: raw }),
+            });
+            if (res.ok) {
+              const data = await res.json();
+              this.newSourceForm.channel_name = data.channel_name || '';
+              this.newSourceForm.youtube_channel_id = data.youtube_channel_id || '';
+              this.newSourceForm.rss_url = data.rss_url || '';
+              this.showToast('Resolved channel: ' + data.channel_name);
+            } else {
+              const err = await res.json();
+              this.sourcesModal.resolveError = err.detail || 'Could not resolve channel.';
+            }
+          } catch (e) {
+            this.sourcesModal.resolveError = 'Network error connecting to resolver.';
+          } finally {
+            this.sourcesModal.isResolving = false;
+          }
+        },
+
+        async saveNewSource() {
+          if (!this.newSourceForm.channel_name || !this.newSourceForm.youtube_channel_id) return;
+          this.sourcesModal.isSaving = true;
+          try {
+            const res = await fetch('/api/sources', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.newSourceForm),
+            });
+            if (res.ok) {
+              this.showToast('Source channel saved!');
+              this.newSourceForm = {
+                channel_name: '',
+                youtube_channel_id: '',
+                rss_url: '',
+                target_channel: 'Wealth Signals',
+                layout: 'cinema_blur',
+                director_prompt: '',
+                max_clips_per_vod: 2,
+                min_score: 8.0,
+                permission: 'unconfirmed',
+                enabled: 0,
+              };
+              this.sourcesModal.resolveInput = '';
+              await this.fetchSources();
+            } else {
+              const err = await res.json();
+              alert(err.detail || 'Failed to save source.');
+            }
+          } catch (e) {
+            alert('Failed to connect to server.');
+          } finally {
+            this.sourcesModal.isSaving = false;
+          }
+        },
+
+        async toggleSourcePermission(source) {
+          const nextPerm = source.permission === 'confirmed' ? 'unconfirmed' : 'confirmed';
+          const nextEnabled = nextPerm === 'confirmed' ? source.enabled : 0;
+          try {
+            const res = await fetch('/api/sources/' + source.id, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                permission: nextPerm,
+                enabled: nextEnabled,
+              }),
+            });
+            if (res.ok) {
+              source.permission = nextPerm;
+              source.enabled = nextEnabled;
+              this.showToast(`Permission updated to ${nextPerm}`);
+              await this.fetchSources();
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        async toggleSourceEnabled(source) {
+          if (source.permission !== 'confirmed') {
+            alert('Cannot enable channel: creator permission is Unconfirmed!\nPlease set Permission to Confirmed first.');
+            return;
+          }
+          const nextEnabled = source.enabled === 1 ? 0 : 1;
+          try {
+            const res = await fetch('/api/sources/' + source.id, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: nextEnabled }),
+            });
+            if (res.ok) {
+              source.enabled = nextEnabled;
+              this.showToast(nextEnabled === 1 ? 'Channel enabled for nightly runs' : 'Channel disabled');
+              await this.fetchSources();
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        async deleteSource(sourceId) {
+          if (!confirm('Are you sure you want to delete this source channel?')) return;
+          try {
+            const res = await fetch('/api/sources/' + sourceId, { method: 'DELETE' });
+            if (res.ok) {
+              this.showToast('Source channel deleted');
+              await this.fetchSources();
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        },
+
+        copyUploadTitle(clip) {
+          const text = clip.upload_title || (clip.hook_title ? `${clip.hook_title} #shorts` : 'Viral Clip #shorts');
+          navigator.clipboard.writeText(text);
+          this.copiedKey = clip.id + '_title';
+          this.showToast('Upload title copied!');
+          setTimeout(() => { if (this.copiedKey === clip.id + '_title') this.copiedKey = null; }, 2000);
+        },
+
+        copyUploadDescription(clip) {
+          const text = clip.upload_description || 'Insightful clip. #shorts #viral';
+          navigator.clipboard.writeText(text);
+          this.copiedKey = clip.id + '_desc';
+          this.showToast('Upload description copied!');
+          setTimeout(() => { if (this.copiedKey === clip.id + '_desc') this.copiedKey = null; }, 2000);
+        },
+
+        copyPinnedComment(clip) {
+          const text = clip.pinned_comment || 'What was your biggest takeaway from this clip?';
+          navigator.clipboard.writeText(text);
+          this.copiedKey = clip.id + '_comment';
+          this.showToast('Pinned comment copied!');
+          setTimeout(() => { if (this.copiedKey === clip.id + '_comment') this.copiedKey = null; }, 2000);
+        },
+
+        copyCompleteUploadPack(clip) {
+          const title = clip.upload_title || (clip.hook_title ? `${clip.hook_title} #shorts` : 'Viral Clip #shorts');
+          const desc = clip.upload_description || '';
+          const comment = clip.pinned_comment || '';
+          const pack = `TITLE:\n${title}\n\nDESCRIPTION:\n${desc}\n\nPINNED COMMENT:\n${comment}`;
+          navigator.clipboard.writeText(pack);
+          this.showToast('Complete Upload Pack copied to clipboard!');
         }
       };
     }
