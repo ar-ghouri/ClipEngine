@@ -1061,9 +1061,9 @@
             <div>
               <label class="block text-[10px] font-semibold text-zinc-400 mb-1">Max Clips per VOD (1-3)</label>
               <select x-model.number="newSourceForm.max_clips_per_vod" class="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white">
-                <option :value="1">1 Clip</option>
-                <option :value="2">2 Clips (Default)</option>
-                <option :value="3">3 Clips (Max)</option>
+                <option value="1">1 Clip</option>
+                <option value="2">2 Clips (Default)</option>
+                <option value="3">3 Clips (Max)</option>
               </select>
             </div>
             <div>
@@ -1096,7 +1096,6 @@
                   <input
                     type="checkbox"
                     :disabled="newSourceForm.permission !== 'confirmed'"
-                    x-model="newSourceForm.enabled"
                     :checked="newSourceForm.enabled === 1"
                     @change="newSourceForm.enabled = $event.target.checked ? 1 : 0"
                     class="rounded bg-zinc-800 border-zinc-700 text-brand-600 focus:ring-0"
@@ -1659,10 +1658,22 @@
           if (!this.newSourceForm.channel_name || !this.newSourceForm.youtube_channel_id) return;
           this.sourcesModal.isSaving = true;
           try {
+            const payload = {
+              channel_name: String(this.newSourceForm.channel_name || '').trim(),
+              youtube_channel_id: String(this.newSourceForm.youtube_channel_id || '').trim(),
+              rss_url: this.newSourceForm.rss_url ? String(this.newSourceForm.rss_url).trim() : null,
+              target_channel: String(this.newSourceForm.target_channel || 'Wealth Signals').trim(),
+              layout: String(this.newSourceForm.layout || 'cinema_blur').trim(),
+              director_prompt: this.newSourceForm.director_prompt ? String(this.newSourceForm.director_prompt).trim() : null,
+              max_clips_per_vod: parseInt(this.newSourceForm.max_clips_per_vod, 10) || 2,
+              min_score: parseFloat(this.newSourceForm.min_score) || 8.0,
+              permission: this.newSourceForm.permission === 'confirmed' ? 'confirmed' : 'unconfirmed',
+              enabled: (this.newSourceForm.permission === 'confirmed' && (this.newSourceForm.enabled === 1 || this.newSourceForm.enabled === true)) ? 1 : 0,
+            };
             const res = await fetch('/api/sources', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(this.newSourceForm),
+              body: JSON.stringify(payload),
             });
             if (res.ok) {
               this.showToast('Source channel saved!');
@@ -1681,11 +1692,26 @@
               this.sourcesModal.resolveInput = '';
               await this.fetchSources();
             } else {
-              const err = await res.json();
-              alert(err.detail || 'Failed to save source.');
+              let errorMsg = 'Failed to save source.';
+              try {
+                const err = await res.json();
+                if (err && err.detail) {
+                  if (typeof err.detail === 'string') {
+                    errorMsg = err.detail;
+                  } else if (Array.isArray(err.detail)) {
+                    errorMsg = err.detail.map(d => `${d.loc ? d.loc.join('.') + ': ' : ''}${d.msg}`).join('\n');
+                  } else {
+                    errorMsg = JSON.stringify(err.detail);
+                  }
+                }
+              } catch {
+                const text = await res.text().catch(() => '');
+                errorMsg = text || `HTTP ${res.status}: ${res.statusText}`;
+              }
+              alert(errorMsg);
             }
           } catch (e) {
-            alert('Failed to connect to server.');
+            alert(`Network error saving source: ${e.message || e}`);
           } finally {
             this.sourcesModal.isSaving = false;
           }

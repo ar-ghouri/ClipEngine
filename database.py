@@ -418,6 +418,16 @@ def add_source(
         channel_name, youtube_channel_id, rss_url, target_channel, layout,
         director_prompt, max_clips_per_vod, min_score, permission, enabled, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(youtube_channel_id) DO UPDATE SET
+        channel_name = excluded.channel_name,
+        rss_url = excluded.rss_url,
+        target_channel = excluded.target_channel,
+        layout = excluded.layout,
+        director_prompt = excluded.director_prompt,
+        max_clips_per_vod = excluded.max_clips_per_vod,
+        min_score = excluded.min_score,
+        permission = excluded.permission,
+        enabled = excluded.enabled
     """
     with get_db_connection(db_path) as conn:
         cursor = conn.execute(
@@ -437,7 +447,13 @@ def add_source(
             ),
         )
         conn.commit()
-        return int(cursor.lastrowid or 0)
+        if cursor.lastrowid:
+            return int(cursor.lastrowid)
+        row = conn.execute(
+            "SELECT id FROM source_channels WHERE youtube_channel_id = ?",
+            (youtube_channel_id,)
+        ).fetchone()
+        return int(row["id"]) if row else 0
 
 
 def update_source(

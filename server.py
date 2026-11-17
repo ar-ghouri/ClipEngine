@@ -485,10 +485,10 @@ class SourceCreateRequest(BaseModel):
     target_channel: str = "Wealth Signals"
     layout: str = "cinema_blur"
     director_prompt: Optional[str] = None
-    max_clips_per_vod: int = Field(default=2, ge=1, le=3)
-    min_score: float = Field(default=8.0, ge=1.0, le=10.0)
+    max_clips_per_vod: Optional[int] = Field(default=2, ge=1, le=3)
+    min_score: Optional[float] = Field(default=8.0, ge=1.0, le=10.0)
     permission: str = "unconfirmed"
-    enabled: int = Field(default=0, ge=0, le=1)
+    enabled: Optional[int] = Field(default=0, ge=0, le=1)
 
 
 class SourceUpdateRequest(BaseModel):
@@ -843,21 +843,30 @@ def list_sources_api() -> Dict[str, Any]:
 
 @app.post("/api/sources")
 def create_source_api(req: SourceCreateRequest) -> Dict[str, Any]:
-    source_id = add_source(
-        channel_name=req.channel_name.strip(),
-        youtube_channel_id=req.youtube_channel_id.strip(),
-        rss_url=req.rss_url.strip() if req.rss_url else None,
-        target_channel=req.target_channel.strip() if req.target_channel else "Wealth Signals",
-        layout=req.layout.strip() if req.layout else "cinema_blur",
-        director_prompt=req.director_prompt.strip() if req.director_prompt else None,
-        max_clips_per_vod=req.max_clips_per_vod,
-        min_score=req.min_score,
-        permission=req.permission,
-        enabled=req.enabled,
-        db_path=DB_PATH,
-    )
-    created = get_source_by_id(source_id, DB_PATH)
-    return {"source": created}
+    try:
+        source_id = add_source(
+            channel_name=req.channel_name.strip(),
+            youtube_channel_id=req.youtube_channel_id.strip(),
+            rss_url=req.rss_url.strip() if req.rss_url else None,
+            target_channel=req.target_channel.strip() if req.target_channel else "Wealth Signals",
+            layout=req.layout.strip() if req.layout else "cinema_blur",
+            director_prompt=req.director_prompt.strip() if req.director_prompt else None,
+            max_clips_per_vod=req.max_clips_per_vod if req.max_clips_per_vod is not None else 2,
+            min_score=req.min_score if req.min_score is not None else 8.0,
+            permission=req.permission,
+            enabled=req.enabled if req.enabled is not None else 0,
+            db_path=DB_PATH,
+        )
+        created = get_source_by_id(source_id, DB_PATH)
+        if not created:
+            raise HTTPException(status_code=500, detail="Failed to retrieve created source channel record")
+        return {"source": created}
+    except sqlite3.IntegrityError as e:
+        raise HTTPException(status_code=400, detail=f"Database constraint error: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create source: {str(e)}")
 
 
 @app.patch("/api/sources/{source_id}")
@@ -866,22 +875,29 @@ def update_source_api(source_id: int, req: SourceUpdateRequest) -> Dict[str, Any
     if not existing:
         raise HTTPException(status_code=404, detail="Source channel not found")
 
-    update_source(
-        source_id=source_id,
-        channel_name=req.channel_name.strip() if req.channel_name is not None else None,
-        youtube_channel_id=req.youtube_channel_id.strip() if req.youtube_channel_id is not None else None,
-        rss_url=req.rss_url.strip() if req.rss_url is not None else None,
-        target_channel=req.target_channel.strip() if req.target_channel is not None else None,
-        layout=req.layout.strip() if req.layout is not None else None,
-        director_prompt=req.director_prompt.strip() if req.director_prompt is not None else None,
-        max_clips_per_vod=req.max_clips_per_vod,
-        min_score=req.min_score,
-        permission=req.permission,
-        enabled=req.enabled,
-        db_path=DB_PATH,
-    )
-    updated = get_source_by_id(source_id, DB_PATH)
-    return {"source": updated}
+    try:
+        update_source(
+            source_id=source_id,
+            channel_name=req.channel_name.strip() if req.channel_name is not None else None,
+            youtube_channel_id=req.youtube_channel_id.strip() if req.youtube_channel_id is not None else None,
+            rss_url=req.rss_url.strip() if req.rss_url is not None else None,
+            target_channel=req.target_channel.strip() if req.target_channel is not None else None,
+            layout=req.layout.strip() if req.layout is not None else None,
+            director_prompt=req.director_prompt.strip() if req.director_prompt is not None else None,
+            max_clips_per_vod=req.max_clips_per_vod,
+            min_score=req.min_score,
+            permission=req.permission,
+            enabled=req.enabled,
+            db_path=DB_PATH,
+        )
+        updated = get_source_by_id(source_id, DB_PATH)
+        return {"source": updated}
+    except sqlite3.IntegrityError as e:
+        raise HTTPException(status_code=400, detail=f"Database constraint error: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update source: {str(e)}")
 
 
 @app.delete("/api/sources/{source_id}")
@@ -889,8 +905,11 @@ def delete_source_api(source_id: int) -> Dict[str, Any]:
     existing = get_source_by_id(source_id, DB_PATH)
     if not existing:
         raise HTTPException(status_code=404, detail="Source channel not found")
-    delete_source(source_id, DB_PATH)
-    return {"status": "ok", "message": f"Source {source_id} deleted"}
+    try:
+        delete_source(source_id, DB_PATH)
+        return {"status": "ok", "message": f"Source {source_id} deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete source: {str(e)}")
 
 
 @app.post("/api/sources/resolve")
