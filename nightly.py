@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-from config import BASE_DIR, DB_PATH, GEMINI_API_KEY, GEMINI_MODEL
+from config import GEMINI_API_KEY, GEMINI_MODEL
 from database import (
     create_nightly_run,
     get_confirmed_sources,
@@ -34,10 +34,18 @@ from database import (
     update_nightly_run,
 )
 
-# Runtime paths
+# Runtime paths relative to project root
+BASE_DIR: Path = Path(__file__).resolve().parent
+DB_PATH: Path = BASE_DIR / "clipengine.db"
+OUTPUTS_DIR: Path = BASE_DIR / "outputs"
+DOWNLOADS_DIR: Path = BASE_DIR / "downloads"
 LOGS_DIR: Path = BASE_DIR / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOCK_FILE: Path = BASE_DIR / "nightly.lock"
+
+# Ensure runtime directories exist on startup
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Safety and Cutoff Limits
 MAX_RUNTIME_HOURS: float = 4.0

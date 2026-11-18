@@ -26,7 +26,23 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from config import BASE_DIR, DB_PATH, OUTPUTS_DIR
+# Base Directory & Runtime Directories
+BASE_DIR: Path = Path(__file__).resolve().parent
+DB_PATH: Path = BASE_DIR / "clipengine.db"
+OUTPUTS_DIR: Path = BASE_DIR / "outputs"
+DOWNLOADS_DIR: Path = BASE_DIR / "downloads"
+LOGS_DIR: Path = BASE_DIR / "logs"
+WEB_DIR: Path = BASE_DIR / "web"
+TRASH_DIR: Path = OUTPUTS_DIR / ".trash"
+LOCK_FILE: Path = BASE_DIR / "nightly.lock"
+
+# Ensure all runtime directories exist on startup
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+WEB_DIR.mkdir(parents=True, exist_ok=True)
+TRASH_DIR.mkdir(parents=True, exist_ok=True)
+
 from database import (
     add_source,
     delete_source,
@@ -38,15 +54,6 @@ from database import (
     resolve_youtube_channel,
     update_source,
 )
-
-# Ensure necessary directories exist
-LOGS_DIR = BASE_DIR / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-WEB_DIR = BASE_DIR / "web"
-WEB_DIR.mkdir(parents=True, exist_ok=True)
-TRASH_DIR = OUTPUTS_DIR / ".trash"
-TRASH_DIR.mkdir(parents=True, exist_ok=True)
-LOCK_FILE = BASE_DIR / "nightly.lock"
 
 
 # ============================================================================
@@ -183,7 +190,7 @@ def init_server_db() -> None:
 def resolve_clip_file(out_path: str) -> Optional[Tuple[Path, str]]:
     """
     Resolves a clip's output_path into an existing Path on disk and its relative /outputs/ URL.
-    Handles both relative ('outputs/...') and absolute ('E:\\...\\outputs\\...') paths cleanly.
+    Handles both relative ('outputs/...') and absolute ('/path/to/outputs/...') paths cleanly.
     """
     p = Path(out_path)
     candidates: List[Path] = []

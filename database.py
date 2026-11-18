@@ -10,7 +10,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import DB_PATH
+BASE_DIR: Path = Path(__file__).resolve().parent
+DB_PATH: Path = BASE_DIR / "clipengine.db"
+OUTPUTS_DIR: Path = BASE_DIR / "outputs"
+DOWNLOADS_DIR: Path = BASE_DIR / "downloads"
+LOGS_DIR: Path = BASE_DIR / "logs"
+
+# Ensure runtime directories exist on startup
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_db_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:

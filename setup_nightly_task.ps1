@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Registers the Windows Scheduled Task for ClipEngine Overnight Batch Clipping.
     
@@ -22,7 +22,7 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = "ClipEngineNightly",
-    [string]$ProjectDir = "E:\NEW Projects\clipping",
+    [string]$ProjectDir = $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }),
     [string]$DailyTime = "10:00PM"
 )
 
@@ -101,3 +101,6 @@ Write-Host "✓ Task '$TaskName' registered successfully!" -ForegroundColor Gree
 Write-Host "  Schedule: Daily at $DailyTime" -ForegroundColor Green
 Write-Host "  WakeToRun: Enabled | Missed-Start Catch-up: Disabled" -ForegroundColor Green
 Write-Host "======================================================================" -ForegroundColor Green
+
+
+

@@ -295,7 +295,7 @@ def escape_ffmpeg_path(path: Union[Path, str]) -> str:
     """
     Converts a file path to POSIX style and escapes Windows drive colons
     and special characters for FFmpeg filtergraph strings (e.g. libass).
-    E:\\path\\file.ass -> E\\:/path/file.ass
+    C:\\path\\file.ass -> C\\:/path/file.ass
     """
     posix_path = str(Path(path).resolve()).replace("\\", "/")
     if len(posix_path) >= 2 and posix_path[1] == ":":

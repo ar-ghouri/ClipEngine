@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 BASE_DIR: Path = Path(__file__).resolve().parent
 DOWNLOADS_DIR: Path = BASE_DIR / "downloads"
 OUTPUTS_DIR: Path = BASE_DIR / "outputs"
+LOGS_DIR: Path = BASE_DIR / "logs"
 ASSETS_DIR: Path = BASE_DIR / "assets"
 BGM_DIR: Path = ASSETS_DIR / "bgm"
 DB_PATH: Path = BASE_DIR / "clipengine.db"
@@ -24,6 +25,7 @@ DB_PATH: Path = BASE_DIR / "clipengine.db"
 # Ensure runtime directories exist
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 BGM_DIR.mkdir(parents=True, exist_ok=True)
 
 # Load environment variables
